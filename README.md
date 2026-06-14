@@ -16,7 +16,7 @@ Default list:
 
 Hidden by default:
 
-- One-message sessions, usually smoke tests. Use `--include-one-message`.
+- Short sessions with fewer than 3 user messages, usually smoke tests. Use `--include-short-sessions`.
 - Hermes sessions. Use `--include-hermes` or `--agent hermes`.
 
 ## Install
@@ -58,10 +58,10 @@ resume --agent pi hermes-agent
 resume --include-hermes discord
 ```
 
-Include one-message smoke-test sessions:
+Include short smoke-test sessions:
 
 ```bash
-resume --include-one-message
+resume --include-short-sessions
 ```
 
 Print a concise non-interactive list. Default limit is 40:

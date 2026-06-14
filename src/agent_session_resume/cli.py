@@ -380,7 +380,8 @@ def shutil_which(name: str) -> str | None:
     return None
 
 
-def collect(include_hermes: bool = False, include_one_message: bool = False) -> list[Session]:
+def collect(include_hermes: bool = False, include_short_sessions: bool = False, include_one_message: bool = False) -> list[Session]:
+    include_short_sessions = include_short_sessions or include_one_message
     sessions = []
     fns = [claude_sessions, codex_sessions, cursor_sessions, pi_sessions, opencode_sessions]
     if include_hermes:
@@ -393,7 +394,7 @@ def collect(include_hermes: bool = False, include_one_message: bool = False) -> 
     # Deduplicate by agent+id, keeping newest path parse.
     by_key: dict[tuple[str, str], Session] = {}
     for s in sessions:
-        if not include_one_message and s.message_count == 1:
+        if not include_short_sessions and s.message_count < 3:
             continue
         key = (s.agent, s.sid)
         if key not in by_key or s.updated > by_key[key].updated:
@@ -478,19 +479,30 @@ def compact_when(s: Session) -> str:
     return datetime.fromtimestamp(s.updated, timezone.utc).astimezone().strftime("%m-%d %H:%M")
 
 
-def row_text(s: Session, width: int = 120) -> str:
+def row_layout(width: int = 120) -> tuple[int, int]:
     name_w = max(18, min(44, width - 65))
     folder_w = max(16, min(40, width - name_w - 39))
+    return name_w, folder_w
+
+
+def header_text(width: int = 120, include_index: bool = False) -> str:
+    name_w, folder_w = row_layout(width)
+    prefix = f"{'#':>3}  " if include_index else ""
+    return f"{prefix}{pad_display('name', name_w)}  {'agent':<8}  {pad_display('folder', folder_w)}  {'msgs':>4}  modified"
+
+
+def row_text(s: Session, width: int = 120) -> str:
+    name_w, folder_w = row_layout(width)
     name = pad_display(compact_title(s, name_w), name_w)
     folder = pad_display(compact_folder(s, folder_w), folder_w)
     return f"{name}  {s.agent:<8}  {folder}  {s.message_count:>4}  {compact_when(s)}"
 
 
 def render(rows: list[Session]) -> None:
-    print(f"{'#':>3}  {pad_display('name', 42)}  {'agent':<8}  {pad_display('folder', 34)}  {'msgs':>4}  modified")
-    print("-" * 106)
+    print(header_text(120, include_index=True))
+    print("-" * display_width(header_text(120, include_index=True)))
     for i, s in enumerate(rows, 1):
-        print(f"{i:>3}  {pad_display(compact_title(s, 42), 42)}  {s.agent:<8}  {pad_display(compact_folder(s, 34), 34)}  {s.message_count:>4}  {compact_when(s)}")
+        print(f"{i:>3}  {row_text(s, 120)}")
 
 
 def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200) -> int:
@@ -519,7 +531,7 @@ def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200)
             more = "" if loaded >= len(rows) else f"  {loaded}/{len(rows)} loaded"
             header = f"resume  ↑/↓ select  Enter resume  q quit{more}"
             stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
-            stdscr.addnstr(1, 0, f"{pad_display('name', 42)}  {'agent':<8}  {pad_display('folder', 34)}  {'msgs':>4}  modified", w - 1, curses.A_DIM)
+            stdscr.addnstr(1, 0, header_text(w), w - 1, curses.A_DIM)
             visible = max(1, h - 3)
             if selected < top:
                 top = selected
@@ -566,7 +578,8 @@ def main() -> int:
     ap.add_argument("-n", "--limit", type=int, default=40)
     ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "opencode"])
     ap.add_argument("--include-hermes", action="store_true", help="include Hermes sessions in the default all-agent list")
-    ap.add_argument("--include-one-message", action="store_true", help="include one-message/test sessions that are hidden by default")
+    ap.add_argument("--include-short-sessions", action="store_true", help="include sessions with fewer than 3 user messages that are hidden by default")
+    ap.add_argument("--include-one-message", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--exec", dest="exec_index", type=int, help="resume the numbered row from the filtered list")
     ap.add_argument("--print-cmd", type=int, metavar="N", help="print resume command for row N instead of executing")
     ap.add_argument("--json", action="store_true", help="print machine-readable sessions")
@@ -575,7 +588,7 @@ def main() -> int:
     args = ap.parse_args()
 
     include_hermes = args.include_hermes or args.agent == "hermes"
-    rows = collect(include_hermes=include_hermes, include_one_message=args.include_one_message)
+    rows = collect(include_hermes=include_hermes, include_short_sessions=args.include_short_sessions, include_one_message=args.include_one_message)
     if args.agent:
         rows = [s for s in rows if s.agent == args.agent]
     if args.query:
@@ -602,7 +615,7 @@ def main() -> int:
         return run_tui(rows, initial_limit=limit)
 
     render(rows[:limit])
-    print("\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Hidden tests: --include-one-message  |  Hermes: --include-hermes")
+    print("\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Hidden short sessions: --include-short-sessions  |  Hermes: --include-hermes")
     return 0
 
 if __name__ == "__main__":

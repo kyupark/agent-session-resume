@@ -1,4 +1,4 @@
-from agent_session_resume.cli import Session, choose_title, collect, compact_folder, compact_title, compact_when, display_width, first_text, pad_display, looks_like_generated_name, resume_command
+from agent_session_resume.cli import Session, choose_title, collect, compact_folder, compact_title, compact_when, display_width, first_text, header_text, pad_display, looks_like_generated_name, resume_command, row_text
 
 
 def test_compact_title_falls_back_to_session_id():
@@ -23,20 +23,22 @@ def test_codex_resume_command():
     assert resume_command(s) == ["codex", "resume", "--all", "-C", "/tmp/project", "abc"]
 
 
-def test_collect_hides_one_message_sessions_by_default(monkeypatch):
+def test_collect_hides_short_sessions_by_default(monkeypatch):
     import agent_session_resume.cli as cli
 
     monkeypatch.setattr(cli, "claude_sessions", lambda: [
-        Session(agent="claude", sid="one", cwd="/tmp/one", updated=2, message_count=1),
-        Session(agent="claude", sid="two", cwd="/tmp/two", updated=1, message_count=2),
+        Session(agent="claude", sid="one", cwd="/tmp/one", updated=3, message_count=1),
+        Session(agent="claude", sid="two", cwd="/tmp/two", updated=2, message_count=2),
+        Session(agent="claude", sid="three", cwd="/tmp/three", updated=1, message_count=3),
     ])
     monkeypatch.setattr(cli, "codex_sessions", lambda: [])
     monkeypatch.setattr(cli, "cursor_sessions", lambda: [])
     monkeypatch.setattr(cli, "pi_sessions", lambda: [])
     monkeypatch.setattr(cli, "opencode_sessions", lambda: [])
 
-    assert [s.sid for s in collect()] == ["two"]
-    assert [s.sid for s in collect(include_one_message=True)] == ["one", "two"]
+    assert [s.sid for s in collect()] == ["three"]
+    assert [s.sid for s in collect(include_short_sessions=True)] == ["one", "two", "three"]
+    assert [s.sid for s in collect(include_one_message=True)] == ["one", "two", "three"]
 
 
 def test_generated_names_fall_back_to_last_message():
@@ -65,3 +67,12 @@ def test_display_padding_handles_korean_width():
 def test_compact_title_truncates_by_display_width():
     s = Session(agent="claude", sid="abc", cwd="/tmp", updated=0, title="한국어세션이름")
     assert display_width(compact_title(s, 8)) <= 8
+
+
+def test_header_matches_row_column_positions():
+    s = Session(agent="claude", sid="abc", cwd="/tmp/한글프로젝트", updated=0, title="한국어 세션 이름", message_count=3)
+    header = header_text(80)
+    row = row_text(s, 80)
+    assert display_width(header[:header.index("agent")]) == display_width(row[:row.index("claude")])
+    assert display_width(header[:header.index("folder")]) == display_width(row[:row.index("/tmp")])
+    assert display_width(header[:header.index("msgs")]) == display_width(row[:row.index("   3")])
