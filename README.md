@@ -64,11 +64,14 @@ Include one-message smoke-test sessions:
 resume --include-one-message
 ```
 
-Print a concise non-interactive list:
+Print a concise non-interactive list. Default limit is 200:
 
 ```bash
-resume --no-tui -n 20
+resume --no-tui
+resume --no-tui -n 500
 ```
+
+The TUI loads the first 200 rows by default and automatically loads another 200 as you move near the end. Press `G` or `End` to load/jump to the end.
 
 Resume a numbered row from the filtered list:
 

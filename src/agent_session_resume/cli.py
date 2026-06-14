@@ -396,7 +396,7 @@ def render(rows: list[Session]) -> None:
         print(f"{i:>3}  {compact_title(s, 42):<42}  {s.agent:<8}  {compact_folder(s, 34):<34}  {compact_when(s)}")
 
 
-def run_tui(rows: list[Session]) -> int:
+def run_tui(rows: list[Session], initial_limit: int = 200) -> int:
     if not rows:
         print("No sessions found")
         return 1
@@ -404,15 +404,23 @@ def run_tui(rows: list[Session]) -> int:
 
     selected = 0
     top = 0
+    loaded = min(len(rows), max(1, initial_limit))
+
+    def load_more(min_needed: int = 1) -> None:
+        nonlocal loaded
+        if loaded < len(rows) and min_needed >= loaded - 5:
+            loaded = min(len(rows), loaded + max(1, initial_limit))
 
     def draw(stdscr):
-        nonlocal selected, top
+        nonlocal selected, top, loaded
         curses.curs_set(0)
         stdscr.keypad(True)
         while True:
+            load_more(selected)
             stdscr.erase()
             h, w = stdscr.getmaxyx()
-            header = "resume  ↑/↓ select  Enter resume  q quit"
+            more = "" if loaded >= len(rows) else f"  {loaded}/{len(rows)} loaded"
+            header = f"resume  ↑/↓ select  Enter resume  q quit{more}"
             stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
             stdscr.addnstr(1, 0, f"{'name':<42}  {'agent':<8}  {'folder':<34}  modified", w - 1, curses.A_DIM)
             visible = max(1, h - 3)
@@ -420,7 +428,7 @@ def run_tui(rows: list[Session]) -> int:
                 top = selected
             if selected >= top + visible:
                 top = selected - visible + 1
-            for screen_i, row_i in enumerate(range(top, min(len(rows), top + visible)), start=2):
+            for screen_i, row_i in enumerate(range(top, min(loaded, top + visible)), start=2):
                 line = row_text(rows[row_i], w)
                 attr = curses.A_REVERSE if row_i == selected else curses.A_NORMAL
                 stdscr.addnstr(screen_i, 0, line, w - 1, attr)
@@ -431,15 +439,23 @@ def run_tui(rows: list[Session]) -> int:
             if ch in (curses.KEY_UP, ord('k')):
                 selected = max(0, selected - 1)
             elif ch in (curses.KEY_DOWN, ord('j')):
-                selected = min(len(rows) - 1, selected + 1)
+                selected = min(loaded - 1, selected + 1)
+                load_more(selected)
             elif ch in (curses.KEY_NPAGE,):
-                selected = min(len(rows) - 1, selected + visible)
+                selected = min(loaded - 1, selected + visible)
+                load_more(selected)
+            elif ch in (curses.KEY_END, ord('G')):
+                loaded = len(rows)
+                selected = len(rows) - 1
             elif ch in (curses.KEY_PPAGE,):
                 selected = max(0, selected - visible)
             elif ch in (10, 13, curses.KEY_ENTER):
                 return selected
 
-    idx = curses.wrapper(draw)
+    try:
+        idx = curses.wrapper(draw)
+    except KeyboardInterrupt:
+        return 130
     if idx is None:
         return 0
     cmd = resume_command(rows[idx])
@@ -450,7 +466,7 @@ def run_tui(rows: list[Session]) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="List and resume recent coding-agent sessions across agents and folders.")
     ap.add_argument("query", nargs="*", help="case-insensitive filter across agent, cwd, title, session id")
-    ap.add_argument("-n", "--limit", type=int, default=40)
+    ap.add_argument("-n", "--limit", type=int, default=200)
     ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "opencode"])
     ap.add_argument("--include-hermes", action="store_true", help="include Hermes sessions in the default all-agent list")
     ap.add_argument("--include-one-message", action="store_true", help="include one-message/test sessions that are hidden by default")
@@ -468,28 +484,32 @@ def main() -> int:
     if args.query:
         q = " ".join(args.query).lower()
         rows = [s for s in rows if q in " ".join([s.agent, s.sid, s.cwd, s.title, s.path]).lower()]
-    rows = rows[: max(1, args.limit)]
+    limit = max(1, args.limit)
 
     if args.json:
-        print(json.dumps([s.__dict__ for s in rows], indent=2, ensure_ascii=False))
+        print(json.dumps([s.__dict__ for s in rows[:limit]], indent=2, ensure_ascii=False))
         return 0
 
     if args.print_cmd or args.exec_index:
         idx = (args.print_cmd or args.exec_index) - 1
-        if idx < 0 or idx >= len(rows):
-            raise SystemExit(f"index out of range: {idx+1}; filtered rows={len(rows)}")
-        cmd = resume_command(rows[idx])
+        limited_rows = rows[:limit]
+        if idx < 0 or idx >= len(limited_rows):
+            raise SystemExit(f"index out of range: {idx+1}; filtered rows={len(limited_rows)}")
+        cmd = resume_command(limited_rows[idx])
         if args.print_cmd:
             print(" ".join(shlex.quote(x) for x in cmd))
             return 0
         os.execvp(cmd[0], cmd)
 
     if args.tui or (sys.stdin.isatty() and sys.stdout.isatty() and not args.no_tui):
-        return run_tui(rows)
+        return run_tui(rows, initial_limit=limit)
 
-    render(rows)
+    render(rows[:limit])
     print("\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Hidden tests: --include-one-message  |  Hermes: --include-hermes")
     return 0
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
