@@ -71,10 +71,36 @@ def first_text(obj: Any, limit: int = 90) -> str:
             text = ""
     except RecursionError:
         text = ""
-    text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"<environment_context>.*?</environment_context>", "", text, flags=re.I)
+    text = re.sub(r"<environment_context>.*?</environment_context>", "", text, flags=re.I | re.S)
+    text = re.sub(r"<timestamp>.*?</timestamp>", "", text, flags=re.I | re.S)
     text = text.replace("<user_query>", "").replace("</user_query>", "")
+    text = re.sub(r"\s+", " ", text).strip()
     return text[:limit]
+
+
+
+def looks_like_generated_name(value: str, sid: str = "") -> bool:
+    """Return true for UUID/random-ID titles that are worse than a message snippet."""
+    text = re.sub(r"\s+", " ", (value or "").strip())
+    if not text:
+        return True
+    if sid and text == sid:
+        return True
+    uuid = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    if re.fullmatch(uuid, text):
+        return True
+    if re.fullmatch(rf"(?:agent[-_])?{uuid}", text):
+        return True
+    if re.fullmatch(r"[0-9a-fA-F]{24,64}", text):
+        return True
+    return False
+
+
+def choose_title(title: str, sid: str, fallback: str) -> str:
+    fallback = re.sub(r"\s+", " ", (fallback or "").strip())
+    if fallback and looks_like_generated_name(title, sid):
+        return fallback
+    return title
 
 
 def decode_claude_slug(slug: str) -> str:
@@ -111,19 +137,28 @@ def claude_sessions() -> list[Session]:
         sid = p.stem
         cwd = ""
         title = ""
+        last_message = ""
         updated = p.stat().st_mtime
         message_count = 0
         for msg in load_jsonl(p, 1000):
             updated = max(updated, parse_ts(msg.get("timestamp")))
             cwd = cwd or msg.get("cwd") or (msg.get("attachment") or {}).get("cwd") or ""
             if msg.get("type") in {"queue-operation", "user"}:
+                candidate = first_text(msg.get("content") or msg)
                 message_count += 1
+                if candidate:
+                    last_message = candidate
                 if not title:
-                    title = first_text(msg.get("content") or msg)
-            if message_count > 1 and cwd and title:
+                    title = candidate
+            elif msg.get("type") == "assistant":
+                candidate = first_text(msg.get("content") or msg.get("message") or msg)
+                if candidate:
+                    last_message = candidate
+            if message_count > 1 and cwd and title and not looks_like_generated_name(title, sid):
                 break
         if not cwd:
             cwd = decode_claude_slug(p.parent.name)
+        title = choose_title(title, sid, last_message)
         out.append(Session("claude", sid, cwd, updated, title, str(p), message_count))
     return out
 
@@ -143,6 +178,7 @@ def codex_sessions() -> list[Session]:
         sid = ""
         cwd = ""
         title = ""
+        last_message = ""
         updated = p.stat().st_mtime
         message_count = 0
         for msg in load_jsonl(p, 1000):
@@ -153,14 +189,20 @@ def codex_sessions() -> list[Session]:
                 cwd = cwd or payload.get("cwd") or ""
             if msg.get("type") == "response_item":
                 payload = msg.get("payload") or {}
-                if payload.get("role") == "user":
-                    message_count += 1
-                    if not title:
-                        title = first_text(payload.get("content"))
-            if message_count > 1 and sid and cwd and title:
+                role = payload.get("role")
+                if role in {"user", "assistant"}:
+                    candidate = first_text(payload.get("content"))
+                    if candidate:
+                        last_message = candidate
+                    if role == "user":
+                        message_count += 1
+                        if not title:
+                            title = candidate
+            if message_count > 1 and sid and cwd and title and not looks_like_generated_name(title, sid):
                 break
         sid = sid or p.stem.split("-")[-1]
         title = titles.get(sid) or title
+        title = choose_title(title, sid, last_message)
         out.append(Session("codex", sid, cwd, updated, title, str(p), message_count))
     return out
 
@@ -176,18 +218,23 @@ def cursor_sessions() -> list[Session]:
         # Cursor project directory names are like Users-qm4-Projects-repo.
         cwd = "/" + project_slug.replace("-", "/")
         title = ""
+        last_message = ""
         updated = p.stat().st_mtime
         message_count = 0
         for msg in load_jsonl(p, 1000):
-            if msg.get("role") == "user":
-                candidate = first_text(msg.get("message"))
+            role = msg.get("role")
+            if role in {"user", "assistant"}:
+                candidate = first_text(msg.get("message") or msg.get("content") or msg)
                 # Cursor transcript dumps may prepend synthetic system/context messages.
                 if candidate and not candidate.lower().startswith(("[system]", "# soul.md", "<timestamp>")):
-                    message_count += 1
-                    if not title:
-                        title = candidate
-            if message_count > 1 and title:
+                    last_message = candidate
+                    if role == "user":
+                        message_count += 1
+                        if not title:
+                            title = candidate
+            if message_count > 1 and title and not looks_like_generated_name(title, sid):
                 break
+        title = choose_title(title, sid, last_message)
         out.append(Session("cursor", sid, cwd, updated, title, str(p), message_count))
     return out
 
@@ -202,6 +249,7 @@ def pi_sessions() -> list[Session]:
         sid = ""
         cwd = ""
         title = ""
+        last_message = ""
         updated = p.stat().st_mtime
         message_count = 0
         for msg in load_jsonl(p, 1000):
@@ -211,15 +259,21 @@ def pi_sessions() -> list[Session]:
                 cwd = cwd or msg.get("cwd") or ""
             if msg.get("type") == "message":
                 m = msg.get("message") or {}
-                if m.get("role") == "user":
-                    message_count += 1
-                    if not title:
-                        title = first_text(m.get("content"))
-            if message_count > 1 and sid and cwd and title:
+                role = m.get("role")
+                if role in {"user", "assistant"}:
+                    candidate = first_text(m.get("content"))
+                    if candidate:
+                        last_message = candidate
+                    if role == "user":
+                        message_count += 1
+                        if not title:
+                            title = candidate
+            if message_count > 1 and sid and cwd and title and not looks_like_generated_name(title, sid):
                 break
         sid = sid or p.stem.split("_")[-1]
         if not cwd:
             cwd = decode_claude_slug(p.parent.name.strip("-"))
+        title = choose_title(title, sid, last_message)
         out.append(Session("pi", sid, cwd, updated, title, str(p), message_count))
     return out
 
@@ -253,11 +307,17 @@ def hermes_sessions() -> list[Session]:
         title = display if display and display != "—" else ""
         messages = data.get("messages") or []
         message_count = 0
+        last_message = ""
         for m in messages:
-            if isinstance(m, dict) and m.get("role") == "user":
-                message_count += 1
-                if not title:
-                    title = first_text(m.get("content"))
+            if isinstance(m, dict) and m.get("role") in {"user", "assistant"}:
+                candidate = first_text(m.get("content"))
+                if candidate:
+                    last_message = candidate
+                if m.get("role") == "user":
+                    message_count += 1
+                    if not title:
+                        title = candidate
+        title = choose_title(title, sid, last_message)
         cwd = ""
         sp = data.get("system_prompt") or ""
         m = re.search(r"Current working directory:\s*([^\n]+)", sp)

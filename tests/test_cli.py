@@ -1,4 +1,4 @@
-from agent_session_resume.cli import Session, collect, compact_folder, compact_title, compact_when, resume_command
+from agent_session_resume.cli import Session, choose_title, collect, compact_folder, compact_title, compact_when, first_text, looks_like_generated_name, resume_command
 
 
 def test_compact_title_falls_back_to_session_id():
@@ -37,3 +37,18 @@ def test_collect_hides_one_message_sessions_by_default(monkeypatch):
 
     assert [s.sid for s in collect()] == ["two"]
     assert [s.sid for s in collect(include_one_message=True)] == ["one", "two"]
+
+
+def test_generated_names_fall_back_to_last_message():
+    uuid_title = "1560afec-a028-41c0-bf4b-01382d6a29c4"
+    assert looks_like_generated_name(uuid_title)
+    assert looks_like_generated_name(f"agent-{uuid_title}")
+    assert choose_title(uuid_title, "different-session-id", "Implemented the resume picker") == "Implemented the resume picker"
+    assert choose_title("Human title", "different-session-id", "Implemented the resume picker") == "Human title"
+
+
+def test_first_text_strips_cursor_timestamp_wrappers():
+    wrapped = {
+        "content": [{"type": "text", "text": "<timestamp>Sunday</timestamp>\n<user_query>\nReply exactly: ok\n</user_query>"}]
+    }
+    assert first_text(wrapped) == "Reply exactly: ok"

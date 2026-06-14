@@ -95,7 +95,7 @@ agent-resume
 
 The picker and list show:
 
-- session name
+- session name, falling back from UUID/random generated names to the latest user/assistant message snippet
 - agent name
 - folder
 - last modified date/time as `MM-DD HH:MM`
