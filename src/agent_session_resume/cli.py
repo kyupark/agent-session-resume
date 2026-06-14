@@ -24,6 +24,7 @@ class Session:
     updated: float
     title: str = ""
     path: str = ""
+    message_count: int = 0
 
     @property
     def when(self) -> str:
@@ -111,16 +112,19 @@ def claude_sessions() -> list[Session]:
         cwd = ""
         title = ""
         updated = p.stat().st_mtime
-        for msg in load_jsonl(p, 120):
+        message_count = 0
+        for msg in load_jsonl(p, 1000):
             updated = max(updated, parse_ts(msg.get("timestamp")))
             cwd = cwd or msg.get("cwd") or (msg.get("attachment") or {}).get("cwd") or ""
-            if not title and msg.get("type") in {"queue-operation", "user"}:
-                title = first_text(msg.get("content") or msg)
-            if cwd and title:
+            if msg.get("type") in {"queue-operation", "user"}:
+                message_count += 1
+                if not title:
+                    title = first_text(msg.get("content") or msg)
+            if message_count > 1 and cwd and title:
                 break
         if not cwd:
             cwd = decode_claude_slug(p.parent.name)
-        out.append(Session("claude", sid, cwd, updated, title, str(p)))
+        out.append(Session("claude", sid, cwd, updated, title, str(p), message_count))
     return out
 
 
@@ -140,21 +144,24 @@ def codex_sessions() -> list[Session]:
         cwd = ""
         title = ""
         updated = p.stat().st_mtime
-        for msg in load_jsonl(p, 120):
+        message_count = 0
+        for msg in load_jsonl(p, 1000):
             updated = max(updated, parse_ts(msg.get("timestamp")))
             if msg.get("type") == "session_meta":
                 payload = msg.get("payload") or {}
                 sid = sid or payload.get("id") or ""
                 cwd = cwd or payload.get("cwd") or ""
-            if not title and msg.get("type") == "response_item":
+            if msg.get("type") == "response_item":
                 payload = msg.get("payload") or {}
                 if payload.get("role") == "user":
-                    title = first_text(payload.get("content"))
-            if sid and cwd and title:
+                    message_count += 1
+                    if not title:
+                        title = first_text(payload.get("content"))
+            if message_count > 1 and sid and cwd and title:
                 break
         sid = sid or p.stem.split("-")[-1]
         title = titles.get(sid) or title
-        out.append(Session("codex", sid, cwd, updated, title, str(p)))
+        out.append(Session("codex", sid, cwd, updated, title, str(p), message_count))
     return out
 
 
@@ -170,15 +177,18 @@ def cursor_sessions() -> list[Session]:
         cwd = "/" + project_slug.replace("-", "/")
         title = ""
         updated = p.stat().st_mtime
-        for msg in load_jsonl(p, 120):
-            if not title and msg.get("role") == "user":
+        message_count = 0
+        for msg in load_jsonl(p, 1000):
+            if msg.get("role") == "user":
                 candidate = first_text(msg.get("message"))
                 # Cursor transcript dumps may prepend synthetic system/context messages.
                 if candidate and not candidate.lower().startswith(("[system]", "# soul.md", "<timestamp>")):
-                    title = candidate
-            if title:
+                    message_count += 1
+                    if not title:
+                        title = candidate
+            if message_count > 1 and title:
                 break
-        out.append(Session("cursor", sid, cwd, updated, title, str(p)))
+        out.append(Session("cursor", sid, cwd, updated, title, str(p), message_count))
     return out
 
 
@@ -193,21 +203,24 @@ def pi_sessions() -> list[Session]:
         cwd = ""
         title = ""
         updated = p.stat().st_mtime
-        for msg in load_jsonl(p, 120):
+        message_count = 0
+        for msg in load_jsonl(p, 1000):
             updated = max(updated, parse_ts(msg.get("timestamp")))
             if msg.get("type") == "session":
                 sid = sid or msg.get("id") or ""
                 cwd = cwd or msg.get("cwd") or ""
-            if not title and msg.get("type") == "message":
+            if msg.get("type") == "message":
                 m = msg.get("message") or {}
                 if m.get("role") == "user":
-                    title = first_text(m.get("content"))
-            if sid and cwd and title:
+                    message_count += 1
+                    if not title:
+                        title = first_text(m.get("content"))
+            if message_count > 1 and sid and cwd and title:
                 break
         sid = sid or p.stem.split("_")[-1]
         if not cwd:
             cwd = decode_claude_slug(p.parent.name.strip("-"))
-        out.append(Session("pi", sid, cwd, updated, title, str(p)))
+        out.append(Session("pi", sid, cwd, updated, title, str(p), message_count))
     return out
 
 
@@ -239,11 +252,12 @@ def hermes_sessions() -> list[Session]:
         display = meta.get("display_name") or ""
         title = display if display and display != "—" else ""
         messages = data.get("messages") or []
-        if not title:
-            for m in messages:
-                if isinstance(m, dict) and m.get("role") == "user":
+        message_count = 0
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "user":
+                message_count += 1
+                if not title:
                     title = first_text(m.get("content"))
-                    break
         cwd = ""
         sp = data.get("system_prompt") or ""
         m = re.search(r"Current working directory:\s*([^\n]+)", sp)
@@ -254,7 +268,7 @@ def hermes_sessions() -> list[Session]:
             origin = meta.get("origin") or {}
             cwd = f"hermes:{platform}" + (f":{origin.get('chat_type')}" if origin.get("chat_type") else "")
         updated = parse_ts(data.get("last_updated") or meta.get("updated_at") or data.get("session_start")) or p.stat().st_mtime
-        out.append(Session("hermes", sid, cwd, updated, title, str(p)))
+        out.append(Session("hermes", sid, cwd, updated, title, str(p), message_count))
     # Some active sessions may be in sessions.json before a session_*.json is visible.
     for sid, meta in meta_by_id.items():
         if any(s.sid == sid for s in out):
@@ -262,7 +276,7 @@ def hermes_sessions() -> list[Session]:
         platform = meta.get("platform") or "hermes"
         origin = meta.get("origin") or {}
         cwd = f"hermes:{platform}" + (f":{origin.get('chat_type')}" if origin.get("chat_type") else "")
-        out.append(Session("hermes", sid, cwd, parse_ts(meta.get("updated_at")), meta.get("display_name") or "", str(idx)))
+        out.append(Session("hermes", sid, cwd, parse_ts(meta.get("updated_at")), meta.get("display_name") or "", str(idx), 2))
     return out
 
 def opencode_sessions(limit: int = 100) -> list[Session]:
@@ -289,8 +303,10 @@ def opencode_sessions(limit: int = 100) -> list[Session]:
         cwd = row.get("cwd") or row.get("project") or row.get("path") or ""
         updated = parse_ts(row.get("updated") or row.get("updatedAt") or row.get("time"))
         title = row.get("title") or row.get("name") or ""
+        raw_count = row.get("messageCount") or row.get("message_count") or row.get("messages") or 2
+        message_count = len(raw_count) if isinstance(raw_count, list) else int(raw_count or 2)
         if sid:
-            out.append(Session("opencode", sid, cwd, updated, title, "opencode session list"))
+            out.append(Session("opencode", sid, cwd, updated, title, "opencode session list", message_count))
     return out
 
 
@@ -302,7 +318,7 @@ def shutil_which(name: str) -> str | None:
     return None
 
 
-def collect(include_hermes: bool = False) -> list[Session]:
+def collect(include_hermes: bool = False, include_one_message: bool = False) -> list[Session]:
     sessions = []
     fns = [claude_sessions, codex_sessions, cursor_sessions, pi_sessions, opencode_sessions]
     if include_hermes:
@@ -315,6 +331,8 @@ def collect(include_hermes: bool = False) -> list[Session]:
     # Deduplicate by agent+id, keeping newest path parse.
     by_key: dict[tuple[str, str], Session] = {}
     for s in sessions:
+        if not include_one_message and s.message_count == 1:
+            continue
         key = (s.agent, s.sid)
         if key not in by_key or s.updated > by_key[key].updated:
             by_key[key] = s
@@ -435,6 +453,7 @@ def main() -> int:
     ap.add_argument("-n", "--limit", type=int, default=40)
     ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "opencode"])
     ap.add_argument("--include-hermes", action="store_true", help="include Hermes sessions in the default all-agent list")
+    ap.add_argument("--include-one-message", action="store_true", help="include one-message/test sessions that are hidden by default")
     ap.add_argument("--exec", dest="exec_index", type=int, help="resume the numbered row from the filtered list")
     ap.add_argument("--print-cmd", type=int, metavar="N", help="print resume command for row N instead of executing")
     ap.add_argument("--json", action="store_true", help="print machine-readable sessions")
@@ -443,7 +462,7 @@ def main() -> int:
     args = ap.parse_args()
 
     include_hermes = args.include_hermes or args.agent == "hermes"
-    rows = collect(include_hermes=include_hermes)
+    rows = collect(include_hermes=include_hermes, include_one_message=args.include_one_message)
     if args.agent:
         rows = [s for s in rows if s.agent == args.agent]
     if args.query:
@@ -469,7 +488,7 @@ def main() -> int:
         return run_tui(rows)
 
     render(rows)
-    print("\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Hermes: --include-hermes")
+    print("\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Hidden tests: --include-one-message  |  Hermes: --include-hermes")
     return 0
 
 if __name__ == "__main__":

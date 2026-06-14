@@ -14,9 +14,10 @@ Default list:
 - Pi
 - OpenCode, when `opencode session list --format json` is available
 
-Optional:
+Hidden by default:
 
-- Hermes, hidden by default. Use `--include-hermes` or `--agent hermes`.
+- One-message sessions, usually smoke tests. Use `--include-one-message`.
+- Hermes sessions. Use `--include-hermes` or `--agent hermes`.
 
 ## Install
 
@@ -55,6 +56,12 @@ resume trip-plan
 resume --agent codex ss-french
 resume --agent pi hermes-agent
 resume --include-hermes discord
+```
+
+Include one-message smoke-test sessions:
+
+```bash
+resume --include-one-message
 ```
 
 Print a concise non-interactive list:
