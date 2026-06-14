@@ -1,4 +1,4 @@
-from agent_session_resume.cli import Session, choose_title, collect, compact_folder, compact_title, compact_when, first_text, looks_like_generated_name, resume_command
+from agent_session_resume.cli import Session, choose_title, collect, compact_folder, compact_title, compact_when, display_width, first_text, pad_display, looks_like_generated_name, resume_command
 
 
 def test_compact_title_falls_back_to_session_id():
@@ -52,3 +52,16 @@ def test_first_text_strips_cursor_timestamp_wrappers():
         "content": [{"type": "text", "text": "<timestamp>Sunday</timestamp>\n<user_query>\nReply exactly: ok\n</user_query>"}]
     }
     assert first_text(wrapped) == "Reply exactly: ok"
+
+
+def test_display_padding_handles_korean_width():
+    korean = "한국어세션"
+    assert display_width(korean) == 10
+    padded = pad_display(korean, 12)
+    assert display_width(padded) == 12
+    assert padded.endswith("  ")
+
+
+def test_compact_title_truncates_by_display_width():
+    s = Session(agent="claude", sid="abc", cwd="/tmp", updated=0, title="한국어세션이름")
+    assert display_width(compact_title(s, 8)) <= 8

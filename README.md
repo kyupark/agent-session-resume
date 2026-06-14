@@ -64,14 +64,14 @@ Include one-message smoke-test sessions:
 resume --include-one-message
 ```
 
-Print a concise non-interactive list. Default limit is 200:
+Print a concise non-interactive list. Default limit is 40:
 
 ```bash
 resume --no-tui
 resume --no-tui -n 500
 ```
 
-The TUI loads the first 200 rows by default and automatically loads another 200 as you move near the end. Press `G` or `End` to load/jump to the end.
+The TUI starts with 40 rows, prepares another 200 when you move near the end, and continues in 200-row batches as needed. Press `G` or `End` to load/jump to the end.
 
 Resume a numbered row from the filtered list:
 
@@ -98,7 +98,10 @@ The picker and list show:
 - session name, falling back from UUID/random generated names to the latest user/assistant message snippet
 - agent name
 - folder
+- user message count
 - last modified date/time as `MM-DD HH:MM`
+
+Korean/CJK text is measured by terminal display width, not Python string length, so columns stay aligned.
 
 ## Notes
 

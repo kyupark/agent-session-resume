@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -226,12 +227,13 @@ def cursor_sessions() -> list[Session]:
             if role in {"user", "assistant"}:
                 candidate = first_text(msg.get("message") or msg.get("content") or msg)
                 # Cursor transcript dumps may prepend synthetic system/context messages.
-                if candidate and not candidate.lower().startswith(("[system]", "# soul.md", "<timestamp>")):
+                synthetic = candidate.lower().startswith(("[system]", "# soul.md", "<timestamp>")) if candidate else False
+                if role == "user":
+                    message_count += 1
+                if candidate and not synthetic:
                     last_message = candidate
-                    if role == "user":
-                        message_count += 1
-                        if not title:
-                            title = candidate
+                    if role == "user" and not title:
+                        title = candidate
             if message_count > 1 and title and not looks_like_generated_name(title, sid):
                 break
         title = choose_title(title, sid, last_message)
@@ -418,11 +420,46 @@ def resume_command(s: Session) -> list[str]:
     raise SystemExit(f"No resume command for {s.agent}")
 
 
+def display_width(text: str) -> int:
+    width = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            continue
+        width += 2 if unicodedata.east_asian_width(ch) in {"F", "W"} else 1
+    return width
+
+
+def truncate_display(text: str, max_width: int) -> str:
+    if max_width <= 0:
+        return ""
+    if display_width(text) <= max_width:
+        return text
+    ellipsis = "…"
+    target = max(0, max_width - display_width(ellipsis))
+    out = []
+    used = 0
+    for ch in text:
+        ch_w = 0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in {"F", "W"} else 1
+        if used + ch_w > target:
+            break
+        out.append(ch)
+        used += ch_w
+    return "".join(out) + ellipsis
+
+
+def pad_display(text: str, width: int, align: str = "<") -> str:
+    text = truncate_display(text, width)
+    pad = max(0, width - display_width(text))
+    if align == ">":
+        return " " * pad + text
+    return text + " " * pad
+
+
 def compact_title(s: Session, max_len: int = 42) -> str:
     title = re.sub(r"\s+", " ", (s.title or "").strip())
     if not title:
         title = s.sid
-    return title[: max_len - 1] + "…" if len(title) > max_len else title
+    return truncate_display(title, max_len)
 
 
 def compact_folder(s: Session, max_len: int = 34) -> str:
@@ -432,7 +469,7 @@ def compact_folder(s: Session, max_len: int = 34) -> str:
         folder = cwd
     else:
         folder = cwd.rstrip("/") or "/"
-    return "…" + folder[-(max_len - 1):] if len(folder) > max_len else folder
+    return truncate_display(folder, max_len) if display_width(folder) > max_len else folder
 
 
 def compact_when(s: Session) -> str:
@@ -442,21 +479,21 @@ def compact_when(s: Session) -> str:
 
 
 def row_text(s: Session, width: int = 120) -> str:
-    name_w = max(18, min(44, width - 58))
-    folder_w = max(16, min(40, width - name_w - 32))
-    name = compact_title(s, name_w)
-    folder = compact_folder(s, folder_w)
-    return f"{name:<{name_w}}  {s.agent:<8}  {folder:<{folder_w}}  {compact_when(s)}"
+    name_w = max(18, min(44, width - 65))
+    folder_w = max(16, min(40, width - name_w - 39))
+    name = pad_display(compact_title(s, name_w), name_w)
+    folder = pad_display(compact_folder(s, folder_w), folder_w)
+    return f"{name}  {s.agent:<8}  {folder}  {s.message_count:>4}  {compact_when(s)}"
 
 
 def render(rows: list[Session]) -> None:
-    print(f"{'#':>3}  {'name':<42}  {'agent':<8}  {'folder':<34}  modified")
-    print("-" * 100)
+    print(f"{'#':>3}  {pad_display('name', 42)}  {'agent':<8}  {pad_display('folder', 34)}  {'msgs':>4}  modified")
+    print("-" * 106)
     for i, s in enumerate(rows, 1):
-        print(f"{i:>3}  {compact_title(s, 42):<42}  {s.agent:<8}  {compact_folder(s, 34):<34}  {compact_when(s)}")
+        print(f"{i:>3}  {pad_display(compact_title(s, 42), 42)}  {s.agent:<8}  {pad_display(compact_folder(s, 34), 34)}  {s.message_count:>4}  {compact_when(s)}")
 
 
-def run_tui(rows: list[Session], initial_limit: int = 200) -> int:
+def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200) -> int:
     if not rows:
         print("No sessions found")
         return 1
@@ -469,7 +506,7 @@ def run_tui(rows: list[Session], initial_limit: int = 200) -> int:
     def load_more(min_needed: int = 1) -> None:
         nonlocal loaded
         if loaded < len(rows) and min_needed >= loaded - 5:
-            loaded = min(len(rows), loaded + max(1, initial_limit))
+            loaded = min(len(rows), loaded + max(1, load_batch))
 
     def draw(stdscr):
         nonlocal selected, top, loaded
@@ -482,7 +519,7 @@ def run_tui(rows: list[Session], initial_limit: int = 200) -> int:
             more = "" if loaded >= len(rows) else f"  {loaded}/{len(rows)} loaded"
             header = f"resume  ↑/↓ select  Enter resume  q quit{more}"
             stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
-            stdscr.addnstr(1, 0, f"{'name':<42}  {'agent':<8}  {'folder':<34}  modified", w - 1, curses.A_DIM)
+            stdscr.addnstr(1, 0, f"{pad_display('name', 42)}  {'agent':<8}  {pad_display('folder', 34)}  {'msgs':>4}  modified", w - 1, curses.A_DIM)
             visible = max(1, h - 3)
             if selected < top:
                 top = selected
@@ -526,7 +563,7 @@ def run_tui(rows: list[Session], initial_limit: int = 200) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="List and resume recent coding-agent sessions across agents and folders.")
     ap.add_argument("query", nargs="*", help="case-insensitive filter across agent, cwd, title, session id")
-    ap.add_argument("-n", "--limit", type=int, default=200)
+    ap.add_argument("-n", "--limit", type=int, default=40)
     ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "opencode"])
     ap.add_argument("--include-hermes", action="store_true", help="include Hermes sessions in the default all-agent list")
     ap.add_argument("--include-one-message", action="store_true", help="include one-message/test sessions that are hidden by default")
