@@ -20,14 +20,22 @@ Optional:
 
 ## Install
 
+From GitHub:
+
 ```bash
-uv tool install agent-session-resume
+uv tool install git+https://github.com/kyupark/agent-session-resume.git
 ```
 
 or:
 
 ```bash
-pipx install agent-session-resume
+pipx install git+https://github.com/kyupark/agent-session-resume.git
+```
+
+Once the PyPI project is published, this will also work:
+
+```bash
+uv tool install agent-session-resume
 ```
 
 ## Usage
