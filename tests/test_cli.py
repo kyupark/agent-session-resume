@@ -38,9 +38,9 @@ def test_collect_shows_real_one_message_sessions_by_default(monkeypatch):
     import agent_session_resume.cli as cli
 
     monkeypatch.setattr(cli, "claude_sessions", lambda: [
-        Session(agent="claude", sid="one", cwd="/tmp/one", updated=3, message_count=1),
-        Session(agent="claude", sid="two", cwd="/tmp/two", updated=2, message_count=2),
-        Session(agent="claude", sid="three", cwd="/tmp/three", updated=1, message_count=3),
+        Session(agent="claude", sid="one", cwd="/tmp/one", updated=3, message_count=1, agent_message_count=1),
+        Session(agent="claude", sid="two", cwd="/tmp/two", updated=2, message_count=2, agent_message_count=1),
+        Session(agent="claude", sid="three", cwd="/tmp/three", updated=1, message_count=3, agent_message_count=1),
     ])
     monkeypatch.setattr(cli, "codex_sessions", lambda: [])
     monkeypatch.setattr(cli, "cursor_sessions", lambda: [])
@@ -65,11 +65,30 @@ def test_collect_keeps_opencode_opt_in(monkeypatch):
     monkeypatch.setattr(cli, "hermes_sessions", lambda: [])
     monkeypatch.setattr(cli, "openclaw_sessions", lambda: [])
     monkeypatch.setattr(cli, "opencode_sessions", lambda: [
-        Session(agent="opencode", sid="open", cwd="/tmp/open", updated=1, message_count=1),
+        Session(agent="opencode", sid="open", cwd="/tmp/open", updated=1, message_count=1, agent_message_count=1),
     ])
 
     assert collect() == []
     assert [s.sid for s in collect(include_opencode=True)] == ["open"]
+
+
+def test_collect_filters_zero_agent_messages_by_default(monkeypatch):
+    import agent_session_resume.cli as cli
+
+    monkeypatch.setattr(cli, "claude_sessions", lambda: [
+        Session(agent="claude", sid="no-agent", cwd="/tmp/no-agent", updated=2, message_count=1, agent_message_count=0),
+        Session(agent="claude", sid="roundtrip", cwd="/tmp/roundtrip", updated=1, message_count=1, agent_message_count=1),
+    ])
+    monkeypatch.setattr(cli, "codex_sessions", lambda: [])
+    monkeypatch.setattr(cli, "cursor_sessions", lambda: [])
+    monkeypatch.setattr(cli, "pi_sessions", lambda: [])
+    monkeypatch.setattr(cli, "hermes_sessions", lambda: [])
+    monkeypatch.setattr(cli, "openclaw_sessions", lambda: [])
+    monkeypatch.setattr(cli, "opencode_sessions", lambda: [])
+
+    assert [s.sid for s in collect()] == ["roundtrip"]
+    assert [s.sid for s in collect(min_agent_messages=0)] == ["no-agent", "roundtrip"]
+    assert [s.sid for s in collect(include_short_sessions=True)] == ["no-agent", "roundtrip"]
 
 
 def test_openclaw_resume_command_uses_session_key():
@@ -106,9 +125,9 @@ def test_compact_title_truncates_by_display_width():
 
 
 def test_header_matches_row_column_positions():
-    s = Session(agent="claude", sid="abc", cwd="/tmp/한글프로젝트", updated=0, title="한국어 세션 이름", message_count=3)
+    s = Session(agent="claude", sid="abc", cwd="/tmp/한글프로젝트", updated=0, title="한국어 세션 이름", message_count=3, agent_message_count=2)
     header = header_text(80)
     row = row_text(s, 80)
     assert display_width(header[:header.index("agent")]) == display_width(row[:row.index("claude")])
     assert display_width(header[:header.index("folder")]) == display_width(row[:row.index("/tmp")])
-    assert display_width(header[:header.index("msgs")]) == display_width(row[:row.index("   3")])
+    assert display_width(header[:header.index("u/a")]) == display_width(row[:row.index("3/2")])

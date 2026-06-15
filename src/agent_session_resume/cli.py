@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HOME = Path.home()
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 DEFAULT_MIN_USER_MESSAGES = 1
+DEFAULT_MIN_AGENT_MESSAGES = 1
 OLD_SHORT_SESSION_THRESHOLD = 3
 DEFAULT_SCAN_BUDGET = 80
 UUID_RE = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
@@ -41,6 +42,7 @@ class Session:
     schema: str = ""
     count_exact: bool = True
     resume_id: str = ""
+    agent_message_count: int = 0
 
     @property
     def when(self) -> str:
@@ -153,6 +155,10 @@ def session_count(s: Session) -> int:
     return s.message_count
 
 
+def session_agent_count(s: Session) -> int:
+    return s.agent_message_count
+
+
 def looks_like_generated_name(value: str, sid: str = "") -> bool:
     """Return true for UUID/random-ID titles that are worse than a message snippet."""
     text = re.sub(r"\s+", " ", (value or "").strip())
@@ -223,6 +229,7 @@ def claude_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
         last_message = ""
         updated = p.stat().st_mtime
         message_count = 0
+        agent_message_count = 0
         for msg in load_jsonl(p, 1000):
             updated = max(updated, parse_ts(msg.get("timestamp")))
             cwd = cwd or msg.get("cwd") or (msg.get("attachment") or {}).get("cwd") or ""
@@ -236,11 +243,12 @@ def claude_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
             elif msg.get("type") == "assistant":
                 candidate = first_text(msg.get("content") or msg.get("message") or msg)
                 if candidate:
+                    agent_message_count += 1
                     last_message = candidate
         if not cwd:
             cwd = decode_claude_slug(p.parent.name)
         title = choose_title(title, sid, last_message)
-        out.append(Session("claude", sid, cwd, updated, title, str(p), message_count))
+        out.append(Session("claude", sid, cwd, updated, title, str(p), message_count, agent_message_count=agent_message_count))
     return out
 
 
@@ -270,6 +278,7 @@ def codex_sessions(max_files: int | None = None, full_scan: bool = True) -> list
         updated = p.stat().st_mtime
         user_seen: set[str] = set()
         message_count = 0
+        agent_message_count = 0
         schema = "unknown"
         title_source = ""
         warnings: list[str] = []
@@ -331,6 +340,7 @@ def codex_sessions(max_files: int | None = None, full_scan: bool = True) -> list
                     title = candidate
                     title_source = source
             elif role == "assistant" and candidate:
+                agent_message_count += 1
                 last_message = candidate
 
         sid = sid or codex_sid_from_filename(p)
@@ -338,7 +348,7 @@ def codex_sessions(max_files: int | None = None, full_scan: bool = True) -> list
             title = titles[sid]
             title_source = "session_index.thread_name"
         title = choose_title(title, sid, last_message)
-        out.append(Session("codex", sid, cwd, updated, title, str(p), message_count, (), tuple(warnings), title_source, "session_meta" if cwd else "", "jsonl_or_mtime", schema, full_scan, sid))
+        out.append(Session("codex", sid, cwd, updated, title, str(p), message_count, (), tuple(warnings), title_source, "session_meta" if cwd else "", "jsonl_or_mtime", schema, full_scan, sid, agent_message_count))
     return out
 
 
@@ -356,6 +366,7 @@ def cursor_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
         last_message = ""
         updated = p.stat().st_mtime
         message_count = 0
+        agent_message_count = 0
         for msg in load_jsonl(p, 1000):
             role = msg.get("role")
             if role in {"user", "assistant"}:
@@ -364,12 +375,14 @@ def cursor_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
                 synthetic = candidate.lower().startswith(("[system]", "# soul.md", "<timestamp>")) if candidate else False
                 if role == "user":
                     message_count += 1
+                elif role == "assistant" and candidate and not synthetic:
+                    agent_message_count += 1
                 if candidate and not synthetic:
                     last_message = candidate
                     if role == "user" and not title:
                         title = candidate
         title = choose_title(title, sid, last_message)
-        out.append(Session("cursor", sid, cwd, updated, title, str(p), message_count))
+        out.append(Session("cursor", sid, cwd, updated, title, str(p), message_count, agent_message_count=agent_message_count))
     return out
 
 
@@ -386,6 +399,7 @@ def pi_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Se
         last_message = ""
         updated = p.stat().st_mtime
         message_count = 0
+        agent_message_count = 0
         for msg in load_jsonl(p, 1000):
             updated = max(updated, parse_ts(msg.get("timestamp")))
             if msg.get("type") == "session":
@@ -402,11 +416,13 @@ def pi_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Se
                         message_count += 1
                         if not title:
                             title = candidate
+                    elif role == "assistant" and candidate:
+                        agent_message_count += 1
         sid = sid or p.stem.split("_")[-1]
         if not cwd:
             cwd = decode_claude_slug(p.parent.name)
         title = choose_title(title, sid, last_message)
-        out.append(Session("pi", sid, cwd, updated, title, str(p), message_count))
+        out.append(Session("pi", sid, cwd, updated, title, str(p), message_count, agent_message_count=agent_message_count))
     return out
 
 
@@ -444,6 +460,7 @@ def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
                 path,
                 1,
                 count_exact=False,
+                agent_message_count=1,
             ))
         return out
 
@@ -460,6 +477,7 @@ def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
         title = display if display and display != "—" else ""
         messages = data.get("messages") or []
         message_count = 0
+        agent_message_count = 0
         last_message = ""
         for m in messages:
             if isinstance(m, dict) and m.get("role") in {"user", "assistant"}:
@@ -470,6 +488,8 @@ def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
                     message_count += 1
                     if not title:
                         title = candidate
+                elif m.get("role") == "assistant" and candidate:
+                    agent_message_count += 1
         title = choose_title(title, sid, last_message)
         cwd = ""
         sp = data.get("system_prompt") or ""
@@ -481,7 +501,7 @@ def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
             origin = meta.get("origin") or {}
             cwd = f"hermes:{platform}" + (f":{origin.get('chat_type')}" if origin.get("chat_type") else "")
         updated = parse_ts(data.get("last_updated") or meta.get("updated_at") or data.get("session_start")) or p.stat().st_mtime
-        out.append(Session("hermes", sid, cwd, updated, title, str(p), message_count))
+        out.append(Session("hermes", sid, cwd, updated, title, str(p), message_count, agent_message_count=agent_message_count))
     # Some active sessions may be in sessions.json before a session_*.json is visible.
     for sid, meta in meta_by_id.items():
         if any(s.sid == sid for s in out):
@@ -489,7 +509,7 @@ def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
         platform = meta.get("platform") or "hermes"
         origin = meta.get("origin") or {}
         cwd = f"hermes:{platform}" + (f":{origin.get('chat_type')}" if origin.get("chat_type") else "")
-        out.append(Session("hermes", sid, cwd, parse_ts(meta.get("updated_at")), meta.get("display_name") or "", str(idx), 2))
+        out.append(Session("hermes", sid, cwd, parse_ts(meta.get("updated_at")), meta.get("display_name") or "", str(idx), 1, count_exact=False, agent_message_count=1))
     return out
 
 def openclaw_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Session]:
@@ -529,7 +549,7 @@ def openclaw_sessions(max_files: int | None = None, full_scan: bool = True) -> l
                 except OSError:
                     pass
             path = session_file or str(idx)
-            out.append(Session("openclaw", sid or session_key, cwd, updated, title, path, 1, resume_id=session_key))
+            out.append(Session("openclaw", sid or session_key, cwd, updated, title, path, 1, resume_id=session_key, agent_message_count=1))
     return sorted(out, key=lambda s: s.updated, reverse=True)
 
 
@@ -560,7 +580,7 @@ def opencode_sessions(max_files: int | None = None, full_scan: bool = True, limi
         raw_count = row.get("messageCount") or row.get("message_count") or row.get("messages") or 2
         message_count = len(raw_count) if isinstance(raw_count, list) else int(raw_count or 2)
         if sid:
-            out.append(Session("opencode", sid, cwd, updated, title, "opencode session list", message_count))
+            out.append(Session("opencode", sid, cwd, updated, title, "opencode session list", message_count, agent_message_count=message_count))
     return out
 
 
@@ -585,6 +605,7 @@ def collect(
     include_short_sessions: bool = False,
     include_one_message: bool = False,
     min_user_messages: int = DEFAULT_MIN_USER_MESSAGES,
+    min_agent_messages: int = DEFAULT_MIN_AGENT_MESSAGES,
     max_files_per_agent: int | None = None,
     full_scan: bool = True,
     include_opencode: bool = False,
@@ -592,6 +613,7 @@ def collect(
 ) -> list[Session]:
     if include_short_sessions or include_one_message:
         min_user_messages = 0
+        min_agent_messages = 0
     sessions = []
     fns = [claude_sessions, codex_sessions, cursor_sessions, pi_sessions]
     if include_hermes:
@@ -608,8 +630,13 @@ def collect(
     # Deduplicate by agent+id, keeping newest path parse. Fall back to path for missing ids.
     by_key: dict[tuple[str, str], Session] = {}
     for s in sessions:
+        hidden = []
         if s.message_count < min_user_messages:
-            s.hidden_reasons = (f"short<{min_user_messages}",)
+            hidden.append(f"user<{min_user_messages}")
+        if s.agent_message_count < min_agent_messages:
+            hidden.append(f"agent<{min_agent_messages}")
+        if hidden:
+            s.hidden_reasons = tuple(hidden)
             continue
         key = (s.agent, s.sid or s.path)
         if key not in by_key or s.updated > by_key[key].updated:
@@ -618,10 +645,10 @@ def collect(
 
 
 def collect_all(include_hermes: bool = True, include_opencode: bool = True, include_openclaw: bool = True) -> list[Session]:
-    return collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0, full_scan=True, include_opencode=include_opencode, include_openclaw=include_openclaw)
+    return collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0, min_agent_messages=0, full_scan=True, include_opencode=include_opencode, include_openclaw=include_openclaw)
 
 
-def store_stats(include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> dict[str, dict[str, int]]:
+def store_stats(include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES, min_agent_messages: int = DEFAULT_MIN_AGENT_MESSAGES) -> dict[str, dict[str, int]]:
     stats: dict[str, dict[str, int]] = {}
     fns = {
         "claude": claude_sessions,
@@ -640,15 +667,17 @@ def store_stats(include_hermes: bool = True, min_user_messages: int = DEFAULT_MI
             rows = []
         stats[agent] = {
             "parsed": len(rows),
-            "visible": sum(1 for s in rows if s.message_count >= min_user_messages),
-            "hidden_short": sum(1 for s in rows if s.message_count < min_user_messages),
+            "visible": sum(1 for s in rows if s.message_count >= min_user_messages and s.agent_message_count >= min_agent_messages),
+            "hidden_user": sum(1 for s in rows if s.message_count < min_user_messages),
+            "hidden_agent": sum(1 for s in rows if s.agent_message_count < min_agent_messages),
+            "hidden_short": sum(1 for s in rows if s.message_count < min_user_messages or s.agent_message_count < min_agent_messages),
             "newest": int(max((s.updated for s in rows), default=0)),
         }
     return stats
 
 
-def print_doctor(agent: str | None = None, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES, as_json: bool = False) -> int:
-    stats = store_stats(include_hermes=True, min_user_messages=min_user_messages)
+def print_doctor(agent: str | None = None, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES, min_agent_messages: int = DEFAULT_MIN_AGENT_MESSAGES, as_json: bool = False) -> int:
+    stats = store_stats(include_hermes=True, min_user_messages=min_user_messages, min_agent_messages=min_agent_messages)
     if agent:
         stats = {agent: stats.get(agent, {"parsed": 0, "visible": 0, "hidden_short": 0, "newest": 0})}
     if as_json:
@@ -657,13 +686,13 @@ def print_doctor(agent: str | None = None, min_user_messages: int = DEFAULT_MIN_
     print(f"agent-session-resume {VERSION}")
     for name, st in stats.items():
         newest = datetime.fromtimestamp(st["newest"], timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M") if st["newest"] else "unknown"
-        print(f"{name:<8} parsed={st['parsed']:<5} visible={st['visible']:<5} hidden_short={st['hidden_short']:<5} newest={newest}")
-    print(f"filter: min_user_messages={min_user_messages}; use --min-user-messages 0 to show everything")
+        print(f"{name:<8} parsed={st['parsed']:<5} visible={st['visible']:<5} hidden_short={st['hidden_short']:<5} hidden_user={st['hidden_user']:<5} hidden_agent={st['hidden_agent']:<5} newest={newest}")
+    print(f"filter: min_user_messages={min_user_messages}, min_agent_messages={min_agent_messages}; use --include-short-sessions to show everything")
     return 0
 
 
-def print_why(term: str, include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> int:
-    rows = collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0)
+def print_why(term: str, include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES, min_agent_messages: int = DEFAULT_MIN_AGENT_MESSAGES) -> int:
+    rows = collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0, min_agent_messages=0)
     q = term.lower()
     matches = [s for s in rows if q in " ".join([s.agent, s.sid, s.cwd, s.title, s.path]).lower()]
     if not matches:
@@ -672,12 +701,15 @@ def print_why(term: str, include_hermes: bool = True, min_user_messages: int = D
     for s in matches[:20]:
         hidden = []
         if s.message_count < min_user_messages:
-            hidden.append(f"short<{min_user_messages}")
+            hidden.append(f"user<{min_user_messages}")
+        if s.agent_message_count < min_agent_messages:
+            hidden.append(f"agent<{min_agent_messages}")
         print(f"{s.agent} {s.sid}")
         print(f"  title: {s.title or '(none)'}")
         print(f"  cwd: {s.cwd or '(none)'}")
         print(f"  path: {s.path}")
         print(f"  user_messages: {s.message_count}")
+        print(f"  agent_messages: {s.agent_message_count}")
         print(f"  schema: {s.schema or 'unknown'}")
         print(f"  hidden_by_current_filter: {', '.join(hidden) if hidden else 'no'}")
         try:
@@ -779,15 +811,17 @@ def row_layout(width: int = 120) -> tuple[int, int]:
 def header_text(width: int = 120, include_index: bool = False) -> str:
     name_w, folder_w = row_layout(width)
     prefix = f"{'#':>3}  " if include_index else ""
-    return f"{prefix}{pad_display('name', name_w)}  {'agent':<8}  {pad_display('folder', folder_w)}  {'msgs':>4}  modified"
+    return f"{prefix}{pad_display('name', name_w)}  {'agent':<8}  {pad_display('folder', folder_w)}  {'u/a':>7}  modified"
 
 
 def row_text(s: Session, width: int = 120) -> str:
     name_w, folder_w = row_layout(width)
     name = pad_display(compact_title(s, name_w), name_w)
     folder = pad_display(compact_folder(s, folder_w), folder_w)
-    msg_count = f"{s.message_count}+" if not s.count_exact else str(s.message_count)
-    return f"{name}  {s.agent:<8}  {folder}  {msg_count:>4}  {compact_when(s)}"
+    user_count = f"{s.message_count}+" if not s.count_exact else str(s.message_count)
+    agent_count = f"{s.agent_message_count}+" if not s.count_exact else str(s.agent_message_count)
+    msg_count = f"{user_count}/{agent_count}"
+    return f"{name}  {s.agent:<8}  {folder}  {msg_count:>7}  {compact_when(s)}"
 
 
 def render(rows: list[Session]) -> None:
@@ -900,6 +934,7 @@ def main() -> int:
     ap.add_argument("-n", "--limit", type=int, default=40)
     ap.add_argument("--version", action="store_true", help="print version and exit")
     ap.add_argument("--min-user-messages", type=int, default=DEFAULT_MIN_USER_MESSAGES, help="minimum real user messages to show; default 1")
+    ap.add_argument("--min-agent-messages", type=int, default=DEFAULT_MIN_AGENT_MESSAGES, help="minimum real agent/assistant messages to show; default 1")
     ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "openclaw", "opencode"])
     ap.add_argument("--all", action="store_true", help="scan every session file; slower but complete")
     ap.add_argument("--include-hermes", action="store_true", help="compatibility no-op; Hermes is included by default")
@@ -907,7 +942,7 @@ def main() -> int:
     ap.add_argument("--include-openclaw", action="store_true", help="compatibility no-op; OpenClaw is included by default when its store exists")
     ap.add_argument("--no-openclaw", action="store_true", help="exclude OpenClaw sessions from the default all-agent list")
     ap.add_argument("--include-opencode", action="store_true", help="include OpenCode immediately via its CLI; default TUI loads it lazily after first draw")
-    ap.add_argument("--include-short-sessions", action="store_true", help="include sessions below --min-user-messages")
+    ap.add_argument("--include-short-sessions", action="store_true", help="include sessions below --min-user-messages or --min-agent-messages")
     ap.add_argument("--include-one-message", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--exec", dest="exec_index", type=int, help="resume the numbered row from the filtered list")
     ap.add_argument("--print-cmd", type=int, metavar="N", help="print resume command for row N instead of executing")
@@ -920,11 +955,11 @@ def main() -> int:
         print(VERSION)
         return 0
     if args.query and args.query[0] == "doctor":
-        return print_doctor(agent=args.agent, min_user_messages=args.min_user_messages, as_json=args.json)
+        return print_doctor(agent=args.agent, min_user_messages=args.min_user_messages, min_agent_messages=args.min_agent_messages, as_json=args.json)
     if args.query and args.query[0] == "why":
         if len(args.query) < 2:
             raise SystemExit("usage: resume why <id|path|query>")
-        return print_why(" ".join(args.query[1:]), include_hermes=True, min_user_messages=args.min_user_messages)
+        return print_why(" ".join(args.query[1:]), include_hermes=True, min_user_messages=args.min_user_messages, min_agent_messages=args.min_agent_messages)
 
     include_hermes = (not args.no_hermes) or args.agent == "hermes"
     include_openclaw = (not args.no_openclaw) or args.agent == "openclaw"
@@ -938,6 +973,7 @@ def main() -> int:
         include_short_sessions=args.include_short_sessions,
         include_one_message=args.include_one_message,
         min_user_messages=args.min_user_messages,
+        min_agent_messages=args.min_agent_messages,
         max_files_per_agent=scan_budget,
         full_scan=full_scan,
         include_opencode=include_opencode,
@@ -969,7 +1005,7 @@ def main() -> int:
         return run_tui(rows, initial_limit=limit, lazy_opencode=lazy_opencode, scan_budget=scan_budget)
 
     render(rows[:limit])
-    print(f"\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Full scan: --all  |  Filter: --min-user-messages {args.min_user_messages}  |  Doctor: resume doctor")
+    print(f"\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Full scan: --all  |  Filter: --min-user-messages {args.min_user_messages} --min-agent-messages {args.min_agent_messages}  |  Doctor: resume doctor")
     return 0
 
 if __name__ == "__main__":
