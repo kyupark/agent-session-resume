@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HOME = Path.home()
-VERSION = "0.1.8"
+VERSION = "0.2.1"
 DEFAULT_MIN_USER_MESSAGES = 1
 OLD_SHORT_SESSION_THRESHOLD = 3
 DEFAULT_SCAN_BUDGET = 80
