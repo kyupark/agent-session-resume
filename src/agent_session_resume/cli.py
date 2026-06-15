@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HOME = Path.home()
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 DEFAULT_MIN_USER_MESSAGES = 1
 OLD_SHORT_SESSION_THRESHOLD = 3
+DEFAULT_SCAN_BUDGET = 80
 UUID_RE = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
 
 
@@ -200,12 +201,21 @@ def load_jsonl(path: Path, max_lines: int = 80) -> Iterable[dict[str, Any]]:
         return
 
 
-def claude_sessions() -> list[Session]:
+def recent_files(root: Path, pattern: str, max_files: int | None = None) -> list[Path]:
+    """Return newest matching files first, optionally capped after cheap stat sorting."""
+    files = [p for p in root.glob(pattern) if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if max_files is not None:
+        return files[:max(0, max_files)]
+    return files
+
+
+def claude_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Session]:
     out: list[Session] = []
     root = HOME / ".claude/projects"
     if not root.exists():
         return out
-    for p in root.glob("*/*.jsonl"):
+    for p in recent_files(root, "*/*.jsonl", max_files):
         sid = p.stem
         cwd = ""
         title = ""
@@ -233,7 +243,7 @@ def claude_sessions() -> list[Session]:
     return out
 
 
-def codex_sessions() -> list[Session]:
+def codex_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Session]:
     out: list[Session] = []
     root = HOME / ".codex/sessions"
     if not root.exists():
@@ -249,7 +259,9 @@ def codex_sessions() -> list[Session]:
             if sid and title and not is_synthetic_text(title) and not looks_like_generated_name(title, sid):
                 titles[sid] = title
 
-    for p in root.glob("**/*.jsonl"):
+    max_lines = 100000 if full_scan else 300
+
+    for p in recent_files(root, "**/*.jsonl", max_files):
         sid = ""
         cwd = ""
         title = ""
@@ -260,7 +272,7 @@ def codex_sessions() -> list[Session]:
         schema = "unknown"
         title_source = ""
         warnings: list[str] = []
-        for msg in load_jsonl(p, 100000):
+        for msg in load_jsonl(p, max_lines):
             updated = max(updated, parse_ts(msg.get("timestamp")))
             typ = msg.get("type")
             if typ == "session_meta":
@@ -325,16 +337,16 @@ def codex_sessions() -> list[Session]:
             title = titles[sid]
             title_source = "session_index.thread_name"
         title = choose_title(title, sid, last_message)
-        out.append(Session("codex", sid, cwd, updated, title, str(p), message_count, (), tuple(warnings), title_source, "session_meta" if cwd else "", "jsonl_or_mtime", schema, True, sid))
+        out.append(Session("codex", sid, cwd, updated, title, str(p), message_count, (), tuple(warnings), title_source, "session_meta" if cwd else "", "jsonl_or_mtime", schema, full_scan, sid))
     return out
 
 
-def cursor_sessions() -> list[Session]:
+def cursor_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Session]:
     out: list[Session] = []
     root = HOME / ".cursor/projects"
     if not root.exists():
         return out
-    for p in root.glob("*/agent-transcripts/*/*.jsonl"):
+    for p in recent_files(root, "*/agent-transcripts/*/*.jsonl", max_files):
         sid = p.stem
         project_slug = p.relative_to(root).parts[0]
         # Cursor project directory names are like Users-qm4-Projects-repo.
@@ -361,12 +373,12 @@ def cursor_sessions() -> list[Session]:
 
 
 
-def pi_sessions() -> list[Session]:
+def pi_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Session]:
     out: list[Session] = []
     root = HOME / ".pi/agent/sessions"
     if not root.exists():
         return out
-    for p in root.glob("*/*.jsonl"):
+    for p in recent_files(root, "*/*.jsonl", max_files):
         sid = ""
         cwd = ""
         title = ""
@@ -397,7 +409,7 @@ def pi_sessions() -> list[Session]:
     return out
 
 
-def hermes_sessions() -> list[Session]:
+def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Session]:
     out: list[Session] = []
     root = HOME / ".hermes/sessions"
     if not root.exists():
@@ -413,7 +425,7 @@ def hermes_sessions() -> list[Session]:
         except Exception:
             pass
     seen_paths: set[Path] = set()
-    for p in root.glob("session_*.json"):
+    for p in recent_files(root, "session_*.json", max_files):
         seen_paths.add(p)
         try:
             data = json.loads(p.read_text())
@@ -458,8 +470,8 @@ def hermes_sessions() -> list[Session]:
         out.append(Session("hermes", sid, cwd, parse_ts(meta.get("updated_at")), meta.get("display_name") or "", str(idx), 2))
     return out
 
-def opencode_sessions(limit: int = 100) -> list[Session]:
-    # Prefer the official CLI when present; it already knows its DB paths.
+def opencode_sessions(max_files: int | None = None, full_scan: bool = True, limit: int = 100) -> list[Session]:
+    # Prefer the official CLI when explicitly requested; it already knows its DB paths.
     exe = shutil_which("opencode")
     if not exe:
         return []
@@ -497,16 +509,34 @@ def shutil_which(name: str) -> str | None:
     return None
 
 
-def collect(include_hermes: bool = False, include_short_sessions: bool = False, include_one_message: bool = False, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> list[Session]:
+def call_scanner(fn, max_files: int | None = None, full_scan: bool = True) -> list[Session]:
+    """Call scanner with new fast-scan args while keeping tests/old adapters simple."""
+    try:
+        return fn(max_files=max_files, full_scan=full_scan)
+    except TypeError:
+        return fn()
+
+
+def collect(
+    include_hermes: bool = False,
+    include_short_sessions: bool = False,
+    include_one_message: bool = False,
+    min_user_messages: int = DEFAULT_MIN_USER_MESSAGES,
+    max_files_per_agent: int | None = None,
+    full_scan: bool = True,
+    include_opencode: bool = False,
+) -> list[Session]:
     if include_short_sessions or include_one_message:
         min_user_messages = 0
     sessions = []
-    fns = [claude_sessions, codex_sessions, cursor_sessions, pi_sessions, opencode_sessions]
+    fns = [claude_sessions, codex_sessions, cursor_sessions, pi_sessions]
+    if include_opencode:
+        fns.append(opencode_sessions)
     if include_hermes:
         fns.append(hermes_sessions)
     for fn in fns:
         try:
-            sessions.extend(fn())
+            sessions.extend(call_scanner(fn, max_files=max_files_per_agent, full_scan=full_scan))
         except Exception as e:
             print(f"warn: {fn.__name__}: {e}", file=sys.stderr)
     # Deduplicate by agent+id, keeping newest path parse. Fall back to path for missing ids.
@@ -521,8 +551,8 @@ def collect(include_hermes: bool = False, include_short_sessions: bool = False, 
     return sorted(by_key.values(), key=lambda s: s.updated, reverse=True)
 
 
-def collect_all(include_hermes: bool = False) -> list[Session]:
-    return collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0)
+def collect_all(include_hermes: bool = False, include_opencode: bool = True) -> list[Session]:
+    return collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0, full_scan=True, include_opencode=include_opencode)
 
 
 def store_stats(include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> dict[str, dict[str, int]]:
@@ -687,7 +717,8 @@ def row_text(s: Session, width: int = 120) -> str:
     name_w, folder_w = row_layout(width)
     name = pad_display(compact_title(s, name_w), name_w)
     folder = pad_display(compact_folder(s, folder_w), folder_w)
-    return f"{name}  {s.agent:<8}  {folder}  {s.message_count:>4}  {compact_when(s)}"
+    msg_count = f"{s.message_count}+" if not s.count_exact else str(s.message_count)
+    return f"{name}  {s.agent:<8}  {folder}  {msg_count:>4}  {compact_when(s)}"
 
 
 def render(rows: list[Session]) -> None:
@@ -771,7 +802,9 @@ def main() -> int:
     ap.add_argument("--version", action="store_true", help="print version and exit")
     ap.add_argument("--min-user-messages", type=int, default=DEFAULT_MIN_USER_MESSAGES, help="minimum real user messages to show; default 1")
     ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "opencode"])
+    ap.add_argument("--all", action="store_true", help="scan every session file; slower but complete")
     ap.add_argument("--include-hermes", action="store_true", help="include Hermes sessions in the default all-agent list")
+    ap.add_argument("--include-opencode", action="store_true", help="include OpenCode via its CLI; opt-in because subprocess discovery can be slow")
     ap.add_argument("--include-short-sessions", action="store_true", help="include sessions below --min-user-messages")
     ap.add_argument("--include-one-message", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--exec", dest="exec_index", type=int, help="resume the numbered row from the filtered list")
@@ -792,7 +825,18 @@ def main() -> int:
         return print_why(" ".join(args.query[1:]), include_hermes=True, min_user_messages=args.min_user_messages)
 
     include_hermes = args.include_hermes or args.agent == "hermes"
-    rows = collect(include_hermes=include_hermes, include_short_sessions=args.include_short_sessions, include_one_message=args.include_one_message, min_user_messages=args.min_user_messages)
+    include_opencode = args.include_opencode or args.agent == "opencode"
+    full_scan = args.all or bool(args.query)
+    scan_budget = None if full_scan else max(DEFAULT_SCAN_BUDGET, args.limit + 40)
+    rows = collect(
+        include_hermes=include_hermes,
+        include_short_sessions=args.include_short_sessions,
+        include_one_message=args.include_one_message,
+        min_user_messages=args.min_user_messages,
+        max_files_per_agent=scan_budget,
+        full_scan=full_scan,
+        include_opencode=include_opencode,
+    )
     if args.agent:
         rows = [s for s in rows if s.agent == args.agent]
     if args.query:
@@ -819,7 +863,7 @@ def main() -> int:
         return run_tui(rows, initial_limit=limit)
 
     render(rows[:limit])
-    print(f"\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Filter: --min-user-messages {args.min_user_messages}  |  Doctor: resume doctor")
+    print(f"\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Full scan: --all  |  Filter: --min-user-messages {args.min_user_messages}  |  Doctor: resume doctor")
     return 0
 
 if __name__ == "__main__":

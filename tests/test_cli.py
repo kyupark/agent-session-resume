@@ -53,6 +53,21 @@ def test_collect_shows_real_one_message_sessions_by_default(monkeypatch):
     assert [s.sid for s in collect(include_one_message=True, min_user_messages=3)] == ["one", "two", "three"]
 
 
+def test_collect_keeps_opencode_opt_in(monkeypatch):
+    import agent_session_resume.cli as cli
+
+    monkeypatch.setattr(cli, "claude_sessions", lambda: [])
+    monkeypatch.setattr(cli, "codex_sessions", lambda: [])
+    monkeypatch.setattr(cli, "cursor_sessions", lambda: [])
+    monkeypatch.setattr(cli, "pi_sessions", lambda: [])
+    monkeypatch.setattr(cli, "opencode_sessions", lambda: [
+        Session(agent="opencode", sid="open", cwd="/tmp/open", updated=1, message_count=1),
+    ])
+
+    assert collect() == []
+    assert [s.sid for s in collect(include_opencode=True)] == ["open"]
+
+
 def test_generated_names_fall_back_to_last_message():
     uuid_title = "1560afec-a028-41c0-bf4b-01382d6a29c4"
     assert looks_like_generated_name(uuid_title)

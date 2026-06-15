@@ -12,12 +12,12 @@ Default list:
 - Codex CLI
 - Cursor Agent
 - Pi
-- OpenCode, when `opencode session list --format json` is available
 
 Hidden by default:
 
 - Metadata-only sessions with no user messages. Use `--min-user-messages 0` to include everything.
 - Hermes sessions. Use `--include-hermes` or `--agent hermes`.
+- OpenCode sessions. Use `--include-opencode` or `--agent opencode`; it shells out to `opencode`, so it is opt-in for startup speed.
 
 ## Install
 
@@ -56,6 +56,7 @@ resume trip-plan
 resume --agent codex ss-french
 resume --agent pi hermes-agent
 resume --include-hermes discord
+resume --include-opencode
 ```
 
 Filter by user-message count:
@@ -70,9 +71,10 @@ Print a concise non-interactive list. Default limit is 40:
 ```bash
 resume --no-tui
 resume --no-tui -n 500
+resume --no-tui --all
 ```
 
-The TUI starts with 40 rows, prepares another 200 when you move near the end, and continues in 200-row batches as needed. Press `G` or `End` to load/jump to the end.
+The default picker uses a recent-first bounded scan for speed. Use `--all` when you need a complete scan of every historical transcript.
 
 Resume a numbered row from the filtered list:
 
