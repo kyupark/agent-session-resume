@@ -12,12 +12,13 @@ Default list:
 - Codex CLI
 - Cursor Agent
 - Pi
+- Hermes
+- OpenClaw
 
 Hidden by default:
 
 - Metadata-only sessions with no user messages. Use `--min-user-messages 0` to include everything.
-- Hermes sessions. Use `--include-hermes` or `--agent hermes`.
-- OpenCode sessions. Use `--include-opencode` or `--agent opencode`; it shells out to `opencode`, so it is opt-in for startup speed.
+- OpenCode sessions in non-interactive output. The TUI starts without OpenCode, then loads it in the background after the first draw. Use `--include-opencode` or `--agent opencode` to include it immediately.
 
 ## Install
 
@@ -55,7 +56,8 @@ Filter sessions:
 resume trip-plan
 resume --agent codex ss-french
 resume --agent pi hermes-agent
-resume --include-hermes discord
+resume --agent hermes discord
+resume --agent openclaw
 resume --include-opencode
 ```
 
@@ -74,7 +76,7 @@ resume --no-tui -n 500
 resume --no-tui --all
 ```
 
-The default picker uses a recent-first bounded scan for speed. Use `--all` when you need a complete scan of every historical transcript.
+The default picker uses a recent-first bounded scan for speed. Hermes and OpenClaw are included by default; OpenCode is loaded after the first TUI screen so it does not block startup. Use `--all` when you need a complete scan of every historical transcript.
 
 Resume a numbered row from the filtered list:
 

@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HOME = Path.home()
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 DEFAULT_MIN_USER_MESSAGES = 1
 OLD_SHORT_SESSION_THRESHOLD = 3
 DEFAULT_SCAN_BUDGET = 80
@@ -425,6 +426,27 @@ def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
         except Exception:
             pass
     seen_paths: set[Path] = set()
+    if not full_scan and meta_by_id:
+        rows = sorted(meta_by_id.items(), key=lambda item: parse_ts(item[1].get("updated_at")), reverse=True)
+        if max_files is not None:
+            rows = rows[:max_files]
+        for sid, meta in rows:
+            platform = meta.get("platform") or "hermes"
+            origin = meta.get("origin") or {}
+            cwd = f"hermes:{platform}" + (f":{origin.get('chat_type')}" if origin.get("chat_type") else "")
+            path = str(root / f"session_{sid}.json")
+            out.append(Session(
+                "hermes",
+                sid,
+                cwd,
+                parse_ts(meta.get("updated_at") or meta.get("created_at")),
+                meta.get("display_name") or "",
+                path,
+                1,
+                count_exact=False,
+            ))
+        return out
+
     for p in recent_files(root, "session_*.json", max_files):
         seen_paths.add(p)
         try:
@@ -469,6 +491,47 @@ def hermes_sessions(max_files: int | None = None, full_scan: bool = True) -> lis
         cwd = f"hermes:{platform}" + (f":{origin.get('chat_type')}" if origin.get("chat_type") else "")
         out.append(Session("hermes", sid, cwd, parse_ts(meta.get("updated_at")), meta.get("display_name") or "", str(idx), 2))
     return out
+
+def openclaw_sessions(max_files: int | None = None, full_scan: bool = True) -> list[Session]:
+    """Read OpenClaw session indexes without parsing large transcript files."""
+    out: list[Session] = []
+    root = HOME / ".openclaw" / "agents"
+    if not root.exists():
+        return out
+    stores = recent_files(root, "*/sessions/sessions.json", max_files)
+    for idx in stores:
+        try:
+            data = json.loads(idx.read_text())
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        parts = idx.relative_to(root).parts
+        agent_id = parts[0] if parts else "main"
+        for key, row in data.items():
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("sessionId") or row.get("session_id") or ""
+            session_key = str(key)
+            if not sid and not session_key:
+                continue
+            label = row.get("label") or row.get("title") or row.get("displayName") or ""
+            chat_type = row.get("chatType") or ""
+            title = label or session_key
+            session_file = row.get("sessionFile") or row.get("session_file") or ""
+            cwd = f"openclaw:{agent_id}"
+            if chat_type:
+                cwd += f":{chat_type}"
+            updated = parse_ts(row.get("updatedAt") or row.get("updated_at") or row.get("sessionStartedAt") or row.get("createdAt"))
+            if not updated and session_file:
+                try:
+                    updated = Path(session_file).stat().st_mtime
+                except OSError:
+                    pass
+            path = session_file or str(idx)
+            out.append(Session("openclaw", sid or session_key, cwd, updated, title, path, 1, resume_id=session_key))
+    return sorted(out, key=lambda s: s.updated, reverse=True)
+
 
 def opencode_sessions(max_files: int | None = None, full_scan: bool = True, limit: int = 100) -> list[Session]:
     # Prefer the official CLI when explicitly requested; it already knows its DB paths.
@@ -518,22 +581,25 @@ def call_scanner(fn, max_files: int | None = None, full_scan: bool = True) -> li
 
 
 def collect(
-    include_hermes: bool = False,
+    include_hermes: bool = True,
     include_short_sessions: bool = False,
     include_one_message: bool = False,
     min_user_messages: int = DEFAULT_MIN_USER_MESSAGES,
     max_files_per_agent: int | None = None,
     full_scan: bool = True,
     include_opencode: bool = False,
+    include_openclaw: bool = True,
 ) -> list[Session]:
     if include_short_sessions or include_one_message:
         min_user_messages = 0
     sessions = []
     fns = [claude_sessions, codex_sessions, cursor_sessions, pi_sessions]
-    if include_opencode:
-        fns.append(opencode_sessions)
     if include_hermes:
         fns.append(hermes_sessions)
+    if include_openclaw:
+        fns.append(openclaw_sessions)
+    if include_opencode:
+        fns.append(opencode_sessions)
     for fn in fns:
         try:
             sessions.extend(call_scanner(fn, max_files=max_files_per_agent, full_scan=full_scan))
@@ -551,8 +617,8 @@ def collect(
     return sorted(by_key.values(), key=lambda s: s.updated, reverse=True)
 
 
-def collect_all(include_hermes: bool = False, include_opencode: bool = True) -> list[Session]:
-    return collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0, full_scan=True, include_opencode=include_opencode)
+def collect_all(include_hermes: bool = True, include_opencode: bool = True, include_openclaw: bool = True) -> list[Session]:
+    return collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0, full_scan=True, include_opencode=include_opencode, include_openclaw=include_openclaw)
 
 
 def store_stats(include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> dict[str, dict[str, int]]:
@@ -563,6 +629,7 @@ def store_stats(include_hermes: bool = True, min_user_messages: int = DEFAULT_MI
         "cursor": cursor_sessions,
         "pi": pi_sessions,
         "opencode": opencode_sessions,
+        "openclaw": openclaw_sessions,
     }
     if include_hermes:
         fns["hermes"] = hermes_sessions
@@ -640,6 +707,8 @@ def resume_command(s: Session) -> list[str]:
         return ["hermes", "--resume", s.sid]
     if s.agent == "opencode":
         return ["opencode", s.cwd or ".", "--session", s.sid]
+    if s.agent == "openclaw":
+        return ["openclaw", "tui", "--session", s.resume_id or s.sid]
     raise SystemExit(f"No resume command for {s.agent}")
 
 
@@ -728,7 +797,16 @@ def render(rows: list[Session]) -> None:
         print(f"{i:>3}  {row_text(s, 120)}")
 
 
-def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200) -> int:
+def merge_sessions(rows: list[Session], extra: list[Session]) -> list[Session]:
+    by_key: dict[tuple[str, str], Session] = {(s.agent, s.sid or s.path): s for s in rows}
+    for s in extra:
+        key = (s.agent, s.sid or s.path)
+        if key not in by_key or s.updated > by_key[key].updated:
+            by_key[key] = s
+    return sorted(by_key.values(), key=lambda s: s.updated, reverse=True)
+
+
+def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200, lazy_opencode: bool = False, scan_budget: int | None = None) -> int:
     if not rows:
         print("No sessions found")
         return 1
@@ -737,6 +815,21 @@ def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200)
     selected = 0
     top = 0
     loaded = min(len(rows), max(1, initial_limit))
+    opencode_state = "loading" if lazy_opencode else ""
+
+    def load_opencode() -> None:
+        nonlocal rows, loaded, opencode_state
+        try:
+            extra = opencode_sessions(max_files=scan_budget, full_scan=False)
+            if extra:
+                rows = merge_sessions(rows, extra)
+                loaded = min(max(loaded, initial_limit), len(rows))
+            opencode_state = f"opencode +{len(extra)}" if extra else "opencode 0"
+        except Exception:
+            opencode_state = "opencode failed"
+
+    if lazy_opencode:
+        threading.Thread(target=load_opencode, daemon=True).start()
 
     def load_more(min_needed: int = 1) -> None:
         nonlocal loaded
@@ -747,12 +840,14 @@ def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200)
         nonlocal selected, top, loaded
         curses.curs_set(0)
         stdscr.keypad(True)
+        stdscr.timeout(250 if lazy_opencode else -1)
         while True:
             load_more(selected)
             stdscr.erase()
             h, w = stdscr.getmaxyx()
             more = "" if loaded >= len(rows) else f"  {loaded}/{len(rows)} loaded"
-            header = f"resume  ↑/↓ select  Enter resume  q quit{more}"
+            lazy = f"  {opencode_state}" if opencode_state else ""
+            header = f"resume  ↑/↓ select  Enter resume  q quit{more}{lazy}"
             stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
             stdscr.addnstr(1, 0, header_text(w), w - 1, curses.A_DIM)
             visible = max(1, h - 3)
@@ -766,6 +861,10 @@ def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200)
                 stdscr.addnstr(screen_i, 0, line, w - 1, attr)
             stdscr.refresh()
             ch = stdscr.getch()
+            if ch == -1:
+                if opencode_state and not opencode_state.startswith("loading"):
+                    stdscr.timeout(-1)
+                continue
             if ch in (ord('q'), 27):
                 return None
             if ch in (curses.KEY_UP, ord('k')):
@@ -801,10 +900,13 @@ def main() -> int:
     ap.add_argument("-n", "--limit", type=int, default=40)
     ap.add_argument("--version", action="store_true", help="print version and exit")
     ap.add_argument("--min-user-messages", type=int, default=DEFAULT_MIN_USER_MESSAGES, help="minimum real user messages to show; default 1")
-    ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "opencode"])
+    ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "openclaw", "opencode"])
     ap.add_argument("--all", action="store_true", help="scan every session file; slower but complete")
-    ap.add_argument("--include-hermes", action="store_true", help="include Hermes sessions in the default all-agent list")
-    ap.add_argument("--include-opencode", action="store_true", help="include OpenCode via its CLI; opt-in because subprocess discovery can be slow")
+    ap.add_argument("--include-hermes", action="store_true", help="compatibility no-op; Hermes is included by default")
+    ap.add_argument("--no-hermes", action="store_true", help="exclude Hermes sessions from the default all-agent list")
+    ap.add_argument("--include-openclaw", action="store_true", help="compatibility no-op; OpenClaw is included by default when its store exists")
+    ap.add_argument("--no-openclaw", action="store_true", help="exclude OpenClaw sessions from the default all-agent list")
+    ap.add_argument("--include-opencode", action="store_true", help="include OpenCode immediately via its CLI; default TUI loads it lazily after first draw")
     ap.add_argument("--include-short-sessions", action="store_true", help="include sessions below --min-user-messages")
     ap.add_argument("--include-one-message", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--exec", dest="exec_index", type=int, help="resume the numbered row from the filtered list")
@@ -824,7 +926,10 @@ def main() -> int:
             raise SystemExit("usage: resume why <id|path|query>")
         return print_why(" ".join(args.query[1:]), include_hermes=True, min_user_messages=args.min_user_messages)
 
-    include_hermes = args.include_hermes or args.agent == "hermes"
+    include_hermes = (not args.no_hermes) or args.agent == "hermes"
+    include_openclaw = (not args.no_openclaw) or args.agent == "openclaw"
+    want_tui = args.tui or (sys.stdin.isatty() and sys.stdout.isatty() and not args.no_tui)
+    lazy_opencode = want_tui and not args.include_opencode and args.agent is None
     include_opencode = args.include_opencode or args.agent == "opencode"
     full_scan = args.all or bool(args.query)
     scan_budget = None if full_scan else max(DEFAULT_SCAN_BUDGET, args.limit + 40)
@@ -836,6 +941,7 @@ def main() -> int:
         max_files_per_agent=scan_budget,
         full_scan=full_scan,
         include_opencode=include_opencode,
+        include_openclaw=include_openclaw,
     )
     if args.agent:
         rows = [s for s in rows if s.agent == args.agent]
@@ -859,8 +965,8 @@ def main() -> int:
             return 0
         os.execvp(cmd[0], cmd)
 
-    if args.tui or (sys.stdin.isatty() and sys.stdout.isatty() and not args.no_tui):
-        return run_tui(rows, initial_limit=limit)
+    if want_tui:
+        return run_tui(rows, initial_limit=limit, lazy_opencode=lazy_opencode, scan_budget=scan_budget)
 
     render(rows[:limit])
     print(f"\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Full scan: --all  |  Filter: --min-user-messages {args.min_user_messages}  |  Doctor: resume doctor")

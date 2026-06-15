@@ -45,6 +45,8 @@ def test_collect_shows_real_one_message_sessions_by_default(monkeypatch):
     monkeypatch.setattr(cli, "codex_sessions", lambda: [])
     monkeypatch.setattr(cli, "cursor_sessions", lambda: [])
     monkeypatch.setattr(cli, "pi_sessions", lambda: [])
+    monkeypatch.setattr(cli, "hermes_sessions", lambda: [])
+    monkeypatch.setattr(cli, "openclaw_sessions", lambda: [])
     monkeypatch.setattr(cli, "opencode_sessions", lambda: [])
 
     assert [s.sid for s in collect()] == ["one", "two", "three"]
@@ -60,12 +62,19 @@ def test_collect_keeps_opencode_opt_in(monkeypatch):
     monkeypatch.setattr(cli, "codex_sessions", lambda: [])
     monkeypatch.setattr(cli, "cursor_sessions", lambda: [])
     monkeypatch.setattr(cli, "pi_sessions", lambda: [])
+    monkeypatch.setattr(cli, "hermes_sessions", lambda: [])
+    monkeypatch.setattr(cli, "openclaw_sessions", lambda: [])
     monkeypatch.setattr(cli, "opencode_sessions", lambda: [
         Session(agent="opencode", sid="open", cwd="/tmp/open", updated=1, message_count=1),
     ])
 
     assert collect() == []
     assert [s.sid for s in collect(include_opencode=True)] == ["open"]
+
+
+def test_openclaw_resume_command_uses_session_key():
+    s = Session(agent="openclaw", sid="uuid", cwd="openclaw:main:direct", updated=0, resume_id="agent:main:main")
+    assert resume_command(s) == ["openclaw", "tui", "--session", "agent:main:main"]
 
 
 def test_generated_names_fall_back_to_last_message():
