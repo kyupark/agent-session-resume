@@ -1,4 +1,4 @@
-from agent_session_resume.cli import Session, choose_title, collect, compact_folder, compact_title, compact_when, display_width, first_text, header_text, pad_display, looks_like_generated_name, resume_command, row_text
+from agent_session_resume.cli import Session, choose_title, collect, compact_folder, compact_title, compact_when, display_width, first_text, header_text, pad_display, looks_like_generated_name, resume_command, row_text, codex_sid_from_filename
 
 
 def test_compact_title_falls_back_to_session_id():
@@ -23,7 +23,18 @@ def test_codex_resume_command():
     assert resume_command(s) == ["codex", "resume", "--all", "-C", "/tmp/project", "abc"]
 
 
-def test_collect_hides_short_sessions_by_default(monkeypatch):
+def test_codex_resume_command_omits_empty_cwd():
+    s = Session(agent="codex", sid="abc", cwd="", updated=0)
+    assert resume_command(s) == ["codex", "resume", "--all", "abc"]
+
+
+def test_codex_sid_from_rollout_filename():
+    from pathlib import Path
+    p = Path("rollout-2026-06-15T10-00-00-019e245b-687d-7f20-ac51-b8fd4a84d160.jsonl")
+    assert codex_sid_from_filename(p) == "019e245b-687d-7f20-ac51-b8fd4a84d160"
+
+
+def test_collect_shows_real_one_message_sessions_by_default(monkeypatch):
     import agent_session_resume.cli as cli
 
     monkeypatch.setattr(cli, "claude_sessions", lambda: [
@@ -36,9 +47,10 @@ def test_collect_hides_short_sessions_by_default(monkeypatch):
     monkeypatch.setattr(cli, "pi_sessions", lambda: [])
     monkeypatch.setattr(cli, "opencode_sessions", lambda: [])
 
-    assert [s.sid for s in collect()] == ["three"]
-    assert [s.sid for s in collect(include_short_sessions=True)] == ["one", "two", "three"]
-    assert [s.sid for s in collect(include_one_message=True)] == ["one", "two", "three"]
+    assert [s.sid for s in collect()] == ["one", "two", "three"]
+    assert [s.sid for s in collect(min_user_messages=3)] == ["three"]
+    assert [s.sid for s in collect(include_short_sessions=True, min_user_messages=3)] == ["one", "two", "three"]
+    assert [s.sid for s in collect(include_one_message=True, min_user_messages=3)] == ["one", "two", "three"]
 
 
 def test_generated_names_fall_back_to_last_message():

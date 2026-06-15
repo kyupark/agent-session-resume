@@ -16,7 +16,7 @@ Default list:
 
 Hidden by default:
 
-- Short sessions with fewer than 3 user messages, usually smoke tests. Use `--include-short-sessions`.
+- Metadata-only sessions with no user messages. Use `--min-user-messages 0` to include everything.
 - Hermes sessions. Use `--include-hermes` or `--agent hermes`.
 
 ## Install
@@ -58,10 +58,11 @@ resume --agent pi hermes-agent
 resume --include-hermes discord
 ```
 
-Include short smoke-test sessions:
+Filter by user-message count:
 
 ```bash
-resume --include-short-sessions
+resume --min-user-messages 3
+resume --min-user-messages 0
 ```
 
 Print a concise non-interactive list. Default limit is 40:
@@ -83,6 +84,14 @@ Print the command instead of executing it:
 
 ```bash
 resume --print-cmd 3
+```
+
+Diagnose scanner coverage and hidden filters:
+
+```bash
+resume doctor
+resume doctor --agent codex
+resume why <session-id-or-query>
 ```
 
 Backward-compatible binary:

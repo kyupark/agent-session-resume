@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HOME = Path.home()
+VERSION = "0.1.6"
+DEFAULT_MIN_USER_MESSAGES = 1
+OLD_SHORT_SESSION_THRESHOLD = 3
+UUID_RE = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
+
 
 @dataclass
 class Session:
@@ -26,6 +31,14 @@ class Session:
     title: str = ""
     path: str = ""
     message_count: int = 0
+    hidden_reasons: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    title_source: str = ""
+    cwd_source: str = ""
+    updated_source: str = ""
+    schema: str = ""
+    count_exact: bool = True
+    resume_id: str = ""
 
     @property
     def when(self) -> str:
@@ -78,6 +91,64 @@ def first_text(obj: Any, limit: int = 90) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit]
 
+
+
+def raw_text(obj: Any, limit: int = 5000) -> str:
+    """Extract nested text without stripping wrappers; useful for schema detection."""
+    try:
+        if isinstance(obj, str):
+            text = obj
+        elif isinstance(obj, dict):
+            bits = []
+            for key in ("content", "text", "message", "summary", "thread_name", "name"):
+                if key in obj:
+                    bits.append(raw_text(obj[key], limit=limit))
+            if not bits:
+                for v in obj.values():
+                    t = raw_text(v, limit=limit)
+                    if t:
+                        bits.append(t)
+                        break
+            text = " ".join(x for x in bits if x)
+        elif isinstance(obj, list):
+            text = " ".join(raw_text(x, limit=limit) for x in obj[:8])
+        else:
+            text = ""
+    except RecursionError:
+        text = ""
+    return text[:limit]
+
+
+def is_synthetic_text(text: str) -> bool:
+    t = re.sub(r"\s+", " ", (text or "").strip()).lower()
+    if not t:
+        return True
+    synthetic_prefixes = (
+        "# agents.md instructions for",
+        "<environment_context>",
+        "[system]",
+        "# soul.md",
+        "the following is the codex agent history whose request action you are assessing",
+        "the following is the codex agent history added since your last approval assessment",
+    )
+    return t.startswith(synthetic_prefixes) or ("<environment_context>" in t and "<cwd>" in t)
+
+
+def codex_sid_from_filename(path: Path) -> str:
+    matches = UUID_RE.findall(path.stem)
+    return matches[-1] if matches else path.stem.split("_")[-1]
+
+
+def extract_cwd_from_text(text: str) -> str:
+    for pat in (r"<cwd>\s*([^<]+?)\s*</cwd>", r"Current working directory:\s*([^\n]+)"):
+        m = re.search(pat, text or "", flags=re.I | re.S)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def session_count(s: Session) -> int:
+    return s.message_count
 
 
 def looks_like_generated_name(value: str, sid: str = "") -> bool:
@@ -155,8 +226,6 @@ def claude_sessions() -> list[Session]:
                 candidate = first_text(msg.get("content") or msg.get("message") or msg)
                 if candidate:
                     last_message = candidate
-            if message_count > 1 and cwd and title and not looks_like_generated_name(title, sid):
-                break
         if not cwd:
             cwd = decode_claude_slug(p.parent.name)
         title = choose_title(title, sid, last_message)
@@ -169,42 +238,94 @@ def codex_sessions() -> list[Session]:
     root = HOME / ".codex/sessions"
     if not root.exists():
         return out
+
     titles: dict[str, str] = {}
     idx = HOME / ".codex/session_index.jsonl"
     if idx.exists():
-        for row in load_jsonl(idx, 5000):
-            if row.get("id"):
-                titles[row["id"]] = row.get("thread_name") or ""
+        for row in load_jsonl(idx, 100000):
+            sid = row.get("id") or row.get("session_id") or row.get("thread_id")
+            title = row.get("thread_name") or row.get("title") or row.get("name") or ""
+            # session_index is append-like; never erase a useful title with a blank row.
+            if sid and title and not is_synthetic_text(title) and not looks_like_generated_name(title, sid):
+                titles[sid] = title
+
     for p in root.glob("**/*.jsonl"):
         sid = ""
         cwd = ""
         title = ""
         last_message = ""
         updated = p.stat().st_mtime
+        user_seen: set[str] = set()
         message_count = 0
-        for msg in load_jsonl(p, 1000):
+        schema = "unknown"
+        title_source = ""
+        warnings: list[str] = []
+        for msg in load_jsonl(p, 100000):
             updated = max(updated, parse_ts(msg.get("timestamp")))
-            if msg.get("type") == "session_meta":
+            typ = msg.get("type")
+            if typ == "session_meta":
+                schema = "current"
                 payload = msg.get("payload") or {}
-                sid = sid or payload.get("id") or ""
+                sid = sid or payload.get("id") or payload.get("session_id") or ""
                 cwd = cwd or payload.get("cwd") or ""
-            if msg.get("type") == "response_item":
+                continue
+
+            role = ""
+            candidate = ""
+            source = ""
+            synthetic = False
+
+            if typ == "response_item":
+                schema = "current"
                 payload = msg.get("payload") or {}
-                role = payload.get("role")
-                if role in {"user", "assistant"}:
+                if payload.get("type") in {"message", None}:
+                    role = payload.get("role") or ""
+                    candidate_raw = raw_text(payload.get("content"))
                     candidate = first_text(payload.get("content"))
-                    if candidate:
-                        last_message = candidate
-                    if role == "user":
-                        message_count += 1
-                        if not title:
-                            title = candidate
-            if message_count > 1 and sid and cwd and title and not looks_like_generated_name(title, sid):
-                break
-        sid = sid or p.stem.split("-")[-1]
-        title = titles.get(sid) or title
+                    synthetic = role == "user" and is_synthetic_text(candidate_raw)
+                    if synthetic:
+                        cwd = cwd or extract_cwd_from_text(candidate_raw)
+                    source = "response_item"
+            elif typ == "event_msg":
+                schema = "current"
+                payload = msg.get("payload") or {}
+                ptype = payload.get("type")
+                if ptype == "user_message":
+                    role = "user"
+                    candidate = first_text(payload.get("message") or payload.get("text_elements") or payload)
+                    synthetic = is_synthetic_text(raw_text(payload.get("message") or payload.get("text_elements") or payload))
+                    source = "event_msg.user_message"
+                elif ptype in {"agent_message", "assistant_message"}:
+                    role = "assistant"
+                    candidate = first_text(payload.get("message") or payload)
+                    source = f"event_msg.{ptype}"
+            elif typ == "message" and msg.get("role") in {"user", "assistant"}:
+                schema = "legacy"
+                role = msg.get("role") or ""
+                candidate = first_text(msg.get("content") or msg)
+                source = "legacy.message"
+
+            if role not in {"user", "assistant"}:
+                continue
+            if candidate and not synthetic:
+                last_message = candidate
+            if role == "user" and not synthetic:
+                key = re.sub(r"\s+", " ", candidate).strip().lower()
+                if key and key not in user_seen:
+                    user_seen.add(key)
+                    message_count += 1
+                if candidate and not title and not looks_like_generated_name(candidate, sid):
+                    title = candidate
+                    title_source = source
+            elif role == "assistant" and candidate:
+                last_message = candidate
+
+        sid = sid or codex_sid_from_filename(p)
+        if titles.get(sid):
+            title = titles[sid]
+            title_source = "session_index.thread_name"
         title = choose_title(title, sid, last_message)
-        out.append(Session("codex", sid, cwd, updated, title, str(p), message_count))
+        out.append(Session("codex", sid, cwd, updated, title, str(p), message_count, (), tuple(warnings), title_source, "session_meta" if cwd else "", "jsonl_or_mtime", schema, True, sid))
     return out
 
 
@@ -234,8 +355,6 @@ def cursor_sessions() -> list[Session]:
                     last_message = candidate
                     if role == "user" and not title:
                         title = candidate
-            if message_count > 1 and title and not looks_like_generated_name(title, sid):
-                break
         title = choose_title(title, sid, last_message)
         out.append(Session("cursor", sid, cwd, updated, title, str(p), message_count))
     return out
@@ -270,11 +389,9 @@ def pi_sessions() -> list[Session]:
                         message_count += 1
                         if not title:
                             title = candidate
-            if message_count > 1 and sid and cwd and title and not looks_like_generated_name(title, sid):
-                break
         sid = sid or p.stem.split("_")[-1]
         if not cwd:
-            cwd = decode_claude_slug(p.parent.name.strip("-"))
+            cwd = decode_claude_slug(p.parent.name)
         title = choose_title(title, sid, last_message)
         out.append(Session("pi", sid, cwd, updated, title, str(p), message_count))
     return out
@@ -380,8 +497,9 @@ def shutil_which(name: str) -> str | None:
     return None
 
 
-def collect(include_hermes: bool = False, include_short_sessions: bool = False, include_one_message: bool = False) -> list[Session]:
-    include_short_sessions = include_short_sessions or include_one_message
+def collect(include_hermes: bool = False, include_short_sessions: bool = False, include_one_message: bool = False, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> list[Session]:
+    if include_short_sessions or include_one_message:
+        min_user_messages = 0
     sessions = []
     fns = [claude_sessions, codex_sessions, cursor_sessions, pi_sessions, opencode_sessions]
     if include_hermes:
@@ -391,22 +509,96 @@ def collect(include_hermes: bool = False, include_short_sessions: bool = False, 
             sessions.extend(fn())
         except Exception as e:
             print(f"warn: {fn.__name__}: {e}", file=sys.stderr)
-    # Deduplicate by agent+id, keeping newest path parse.
+    # Deduplicate by agent+id, keeping newest path parse. Fall back to path for missing ids.
     by_key: dict[tuple[str, str], Session] = {}
     for s in sessions:
-        if not include_short_sessions and s.message_count < 3:
+        if s.message_count < min_user_messages:
+            s.hidden_reasons = (f"short<{min_user_messages}",)
             continue
-        key = (s.agent, s.sid)
+        key = (s.agent, s.sid or s.path)
         if key not in by_key or s.updated > by_key[key].updated:
             by_key[key] = s
     return sorted(by_key.values(), key=lambda s: s.updated, reverse=True)
+
+
+def collect_all(include_hermes: bool = False) -> list[Session]:
+    return collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0)
+
+
+def store_stats(include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> dict[str, dict[str, int]]:
+    stats: dict[str, dict[str, int]] = {}
+    fns = {
+        "claude": claude_sessions,
+        "codex": codex_sessions,
+        "cursor": cursor_sessions,
+        "pi": pi_sessions,
+        "opencode": opencode_sessions,
+    }
+    if include_hermes:
+        fns["hermes"] = hermes_sessions
+    for agent, fn in fns.items():
+        try:
+            rows = fn()
+        except Exception:
+            rows = []
+        stats[agent] = {
+            "parsed": len(rows),
+            "visible": sum(1 for s in rows if s.message_count >= min_user_messages),
+            "hidden_short": sum(1 for s in rows if s.message_count < min_user_messages),
+            "newest": int(max((s.updated for s in rows), default=0)),
+        }
+    return stats
+
+
+def print_doctor(agent: str | None = None, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES, as_json: bool = False) -> int:
+    stats = store_stats(include_hermes=True, min_user_messages=min_user_messages)
+    if agent:
+        stats = {agent: stats.get(agent, {"parsed": 0, "visible": 0, "hidden_short": 0, "newest": 0})}
+    if as_json:
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+        return 0
+    print(f"agent-session-resume {VERSION}")
+    for name, st in stats.items():
+        newest = datetime.fromtimestamp(st["newest"], timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M") if st["newest"] else "unknown"
+        print(f"{name:<8} parsed={st['parsed']:<5} visible={st['visible']:<5} hidden_short={st['hidden_short']:<5} newest={newest}")
+    print(f"filter: min_user_messages={min_user_messages}; use --min-user-messages 0 to show everything")
+    return 0
+
+
+def print_why(term: str, include_hermes: bool = True, min_user_messages: int = DEFAULT_MIN_USER_MESSAGES) -> int:
+    rows = collect(include_hermes=include_hermes, include_short_sessions=True, min_user_messages=0)
+    q = term.lower()
+    matches = [s for s in rows if q in " ".join([s.agent, s.sid, s.cwd, s.title, s.path]).lower()]
+    if not matches:
+        print(f"No matching session for {term!r}")
+        return 1
+    for s in matches[:20]:
+        hidden = []
+        if s.message_count < min_user_messages:
+            hidden.append(f"short<{min_user_messages}")
+        print(f"{s.agent} {s.sid}")
+        print(f"  title: {s.title or '(none)'}")
+        print(f"  cwd: {s.cwd or '(none)'}")
+        print(f"  path: {s.path}")
+        print(f"  user_messages: {s.message_count}")
+        print(f"  schema: {s.schema or 'unknown'}")
+        print(f"  hidden_by_current_filter: {', '.join(hidden) if hidden else 'no'}")
+        try:
+            print("  command: " + " ".join(shlex.quote(x) for x in resume_command(s)))
+        except Exception as e:
+            print(f"  command_error: {e}")
+    return 0
 
 
 def resume_command(s: Session) -> list[str]:
     if s.agent == "claude":
         return ["bash", "-lc", f"cd {shlex.quote(s.cwd)} && exec claude --resume {shlex.quote(s.sid)}"]
     if s.agent == "codex":
-        return ["codex", "resume", "--all", "-C", s.cwd, s.sid]
+        cmd = ["codex", "resume", "--all"]
+        if s.cwd:
+            cmd.extend(["-C", s.cwd])
+        cmd.append(s.resume_id or s.sid)
+        return cmd
     if s.agent == "cursor":
         return ["cursor-agent", "--workspace", s.cwd, "--resume", s.sid]
     if s.agent == "pi":
@@ -574,11 +766,13 @@ def run_tui(rows: list[Session], initial_limit: int = 40, load_batch: int = 200)
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="List and resume recent coding-agent sessions across agents and folders.")
-    ap.add_argument("query", nargs="*", help="case-insensitive filter across agent, cwd, title, session id")
+    ap.add_argument("query", nargs="*", help="case-insensitive filter across agent, cwd, title, session id; subcommands: doctor, why <term>")
     ap.add_argument("-n", "--limit", type=int, default=40)
+    ap.add_argument("--version", action="store_true", help="print version and exit")
+    ap.add_argument("--min-user-messages", type=int, default=DEFAULT_MIN_USER_MESSAGES, help="minimum real user messages to show; default 1")
     ap.add_argument("--agent", choices=["claude", "codex", "cursor", "pi", "hermes", "opencode"])
     ap.add_argument("--include-hermes", action="store_true", help="include Hermes sessions in the default all-agent list")
-    ap.add_argument("--include-short-sessions", action="store_true", help="include sessions with fewer than 3 user messages that are hidden by default")
+    ap.add_argument("--include-short-sessions", action="store_true", help="include sessions below --min-user-messages")
     ap.add_argument("--include-one-message", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--exec", dest="exec_index", type=int, help="resume the numbered row from the filtered list")
     ap.add_argument("--print-cmd", type=int, metavar="N", help="print resume command for row N instead of executing")
@@ -587,8 +781,18 @@ def main() -> int:
     ap.add_argument("--no-tui", action="store_true", help="print concise list instead of opening the picker")
     args = ap.parse_args()
 
+    if args.version:
+        print(VERSION)
+        return 0
+    if args.query and args.query[0] == "doctor":
+        return print_doctor(agent=args.agent, min_user_messages=args.min_user_messages, as_json=args.json)
+    if args.query and args.query[0] == "why":
+        if len(args.query) < 2:
+            raise SystemExit("usage: resume why <id|path|query>")
+        return print_why(" ".join(args.query[1:]), include_hermes=True, min_user_messages=args.min_user_messages)
+
     include_hermes = args.include_hermes or args.agent == "hermes"
-    rows = collect(include_hermes=include_hermes, include_short_sessions=args.include_short_sessions, include_one_message=args.include_one_message)
+    rows = collect(include_hermes=include_hermes, include_short_sessions=args.include_short_sessions, include_one_message=args.include_one_message, min_user_messages=args.min_user_messages)
     if args.agent:
         rows = [s for s in rows if s.agent == args.agent]
     if args.query:
@@ -615,7 +819,7 @@ def main() -> int:
         return run_tui(rows, initial_limit=limit)
 
     render(rows[:limit])
-    print("\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Hidden short sessions: --include-short-sessions  |  Hermes: --include-hermes")
+    print(f"\nResume: resume [filter...] --exec N  |  TUI: run in a terminal  |  Filter: --min-user-messages {args.min_user_messages}  |  Doctor: resume doctor")
     return 0
 
 if __name__ == "__main__":
